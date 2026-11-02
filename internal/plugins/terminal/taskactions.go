@@ -198,7 +198,11 @@ func (t *Plugin) watchTaskChanges(ctx context.Context) {
 				w := t.current
 				if w != nil && w.task != nil && w.review != nil && w.review.changesView && !w.finishing && !w.review.job.Running() && !w.review.checkJob.Running() {
 					t.reviewTask(w)
+					return
 				}
+				// Nothing is being reviewed: a poll that found nothing must
+				// not cost the window a frame.
+				t.ctx.FrameDue()
 			})
 		}
 	}

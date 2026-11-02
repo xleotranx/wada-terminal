@@ -67,7 +67,7 @@ func (s *Screen) reflow(cols, rows int) {
 	for y := 0; y < oldRows; {
 		ln := logical{start: y}
 		for {
-			ln.cells = append(ln.cells, s.mainGrid[y*oldCols:(y+1)*oldCols]...)
+			ln.cells = append(ln.cells, s.mainGrid[y]...)
 			if y == oldRows-1 || !s.mainWrap[y] {
 				break
 			}
@@ -90,22 +90,22 @@ func (s *Screen) reflow(cols, rows int) {
 	}
 
 	// Wrap them again.
-	var grid []Cell
+	var grid [][]Cell
 	var wrap []bool
 	starts := make([]int, len(lines))
 	for i, ln := range lines {
 		starts[i] = len(wrap)
 		if len(ln.cells) == 0 {
-			grid = append(grid, blankGrid(cols, 1)...)
+			grid = append(grid, blankLine(cols))
 			wrap = append(wrap, false)
 			continue
 		}
 		for off := 0; off < len(ln.cells); off += cols {
 			end := min(off+cols, len(ln.cells))
-			line := blankGrid(cols, 1)
+			line := blankLine(cols)
 			copy(line, ln.cells[off:end])
 			sanitizeWideLine(line)
-			grid = append(grid, line...)
+			grid = append(grid, line)
 			wrap = append(wrap, end < len(ln.cells))
 		}
 	}
@@ -121,27 +121,27 @@ func (s *Screen) reflow(cols, rows int) {
 		row, col = start+cursorOffset/cols, cursorOffset%cols
 	}
 	for len(wrap) <= row {
-		grid = append(grid, blankGrid(cols, 1)...)
+		grid = append(grid, blankLine(cols))
 		wrap = append(wrap, false)
 	}
 	// Blank lines below the cursor are padding, not content: they must not
 	// push a line the cursor is not on out of the screen.
-	for len(wrap) > row+1 && blankRow(grid[(len(wrap)-1)*cols:]) {
-		grid = grid[:(len(wrap)-1)*cols]
+	for len(wrap) > row+1 && blankRow(grid[len(wrap)-1]) {
+		grid = grid[:len(wrap)-1]
 		wrap = wrap[:len(wrap)-1]
 	}
 
 	// Lines above what the screen can show go to the history.
 	if over := len(wrap) - rows; over > 0 {
 		for i := 0; i < over; i++ {
-			s.pushHistory(grid[i*cols : (i+1)*cols])
+			s.pushHistory(grid[i])
 		}
-		grid = grid[over*cols:]
+		grid = grid[over:]
 		wrap = wrap[over:]
 		row -= over
 	}
 	for len(wrap) < rows {
-		grid = append(grid, blankGrid(cols, 1)...)
+		grid = append(grid, blankLine(cols))
 		wrap = append(wrap, false)
 	}
 
@@ -150,6 +150,7 @@ func (s *Screen) reflow(cols, rows int) {
 	s.mainWrap = wrap
 	s.altGrid = resizeGrid(s.altGrid, oldCols, oldRows, cols, rows)
 	s.altWrap = resizeFlags(s.altWrap, oldRows, rows)
+	s.freeRows = nil
 	s.curX = clampInt(col, 0, cols-1)
 	s.curY = clampInt(row, 0, rows-1)
 	s.wrapNext = false

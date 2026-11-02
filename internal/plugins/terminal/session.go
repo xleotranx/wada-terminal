@@ -122,6 +122,7 @@ type session struct {
 	mu      sync.Mutex
 	inbox   []byte
 	posted  bool
+	drained time.Time // when the UI thread last applied the inbox
 	body    ui.Handle
 	started bool
 
@@ -334,8 +335,17 @@ func (s *session) readLoop() {
 	})
 }
 
+// feedGap is how often a pane applies what its program wrote while output
+// keeps coming. Bytes that arrive within it are one batch: a flood then costs
+// a post and a parse per gap, not one per read, which is most of the window's
+// CPU while a program streams.
+const feedGap = 8 * time.Millisecond
+
 // push appends what the program wrote and asks the UI thread to take it,
-// once, however many reads come before it runs.
+// once, however many reads come before it runs. A read that follows one
+// applied a moment ago waits for the rest of the gap, so a flood reaches the
+// window as large batches; output after a pause goes at once, which keeps
+// typing responsive.
 func (s *session) push(b []byte) {
 	s.mu.Lock()
 	s.inbox = append(s.inbox, b...)
@@ -343,8 +353,21 @@ func (s *session) push(b []byte) {
 	if post {
 		s.posted = true
 	}
+	wait := feedGap - time.Since(s.drained)
 	s.mu.Unlock()
 	if !post {
+		return
+	}
+	if wait <= 0 {
+		s.postFeed()
+		return
+	}
+	time.AfterFunc(wait, s.postFeed)
+}
+
+// postFeed asks the UI thread to apply the inbox and draw what it changed.
+func (s *session) postFeed() {
+	if s.scope == nil {
 		return
 	}
 	s.scope.Post(func() {
@@ -352,6 +375,7 @@ func (s *session) push(b []byte) {
 		b := s.inbox
 		s.inbox = nil
 		s.posted = false
+		s.drained = time.Now()
 		s.mu.Unlock()
 		if len(b) > 0 {
 			s.feed(b)

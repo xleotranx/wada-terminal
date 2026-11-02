@@ -1,27 +1,69 @@
 package vt
 
-// blankGrid makes cols*rows empty cells. A blank cell has Width 1 so that
+// blankGrid makes rows of cols empty cells. A blank cell has Width 1 so that
 // painting a row fills every column; only the second half of a wide
 // character has Width 0.
-func blankGrid(cols, rows int) []Cell {
-	g := make([]Cell, cols*rows)
-	for i := range g {
-		g[i].Width = 1
+func blankGrid(cols, rows int) [][]Cell {
+	g := make([][]Cell, rows)
+	for y := range g {
+		g[y] = blankLine(cols)
 	}
 	return g
 }
 
+// blankLine makes one row of cols empty cells.
+func blankLine(cols int) []Cell {
+	line := make([]Cell, cols)
+	for i := range line {
+		line[i].Width = 1
+	}
+	return line
+}
+
 // resizeGrid keeps the top-left of a grid, padding the new cells with blanks
 // and cropping the right and bottom. It does not reflow.
-func resizeGrid(old []Cell, oldCols, oldRows, cols, rows int) []Cell {
+func resizeGrid(old [][]Cell, oldCols, oldRows, cols, rows int) [][]Cell {
 	g := blankGrid(cols, rows)
-	keepRows := min(oldRows, rows)
+	keepRows := min(oldRows, rows, len(old))
 	keepCols := min(oldCols, cols)
 	for y := 0; y < keepRows; y++ {
-		copy(g[y*cols:y*cols+keepCols], old[y*oldCols:y*oldCols+keepCols])
-		sanitizeWideLine(g[y*cols : (y+1)*cols])
+		copy(g[y][:keepCols], old[y][:min(keepCols, len(old[y]))])
+		sanitizeWideLine(g[y])
 	}
 	return g
+}
+
+// takeRow returns a blank row of the screen's width: one a scroll dropped, or
+// a new one while none wait.
+func (s *Screen) takeRow() []Cell {
+	if n := len(s.freeRows); n > 0 {
+		row := s.freeRows[n-1]
+		s.freeRows = s.freeRows[:n-1]
+		return s.clearedRow(row)
+	}
+	return s.clearedRow(nil)
+}
+
+// clearedRow fills a row with the current rendition's blanks, making one when
+// the screen dropped none.
+func (s *Screen) clearedRow(row []Cell) []Cell {
+	if len(row) != s.cols {
+		row = make([]Cell, s.cols)
+	}
+	c := s.blank()
+	for i := range row {
+		row[i] = c
+	}
+	return row
+}
+
+// keepRow keeps a row a scroll dropped for the next one to reuse. Rows of
+// another width, or more than the grid can hold, are left to the collector.
+func (s *Screen) keepRow(row []Cell) {
+	if len(row) != s.cols || len(s.freeRows) >= 2*s.rows {
+		return
+	}
+	s.freeRows = append(s.freeRows, row)
 }
 
 // sanitizeWideLine repairs a line whose wide characters may have lost one
@@ -47,8 +89,8 @@ func (s *Screen) blank() Cell {
 	return Cell{Style: s.style, Width: 1}
 }
 
-// grid returns the buffer the program is drawing on.
-func (s *Screen) grid() []Cell {
+// grid returns the rows the program is drawing on.
+func (s *Screen) grid() [][]Cell {
 	if s.alternate {
 		return s.altGrid
 	}
@@ -56,10 +98,7 @@ func (s *Screen) grid() []Cell {
 }
 
 // gridLine returns a line of the active buffer. y must be in the grid.
-func (s *Screen) gridLine(y int) []Cell {
-	g := s.grid()
-	return g[y*s.cols : (y+1)*s.cols]
-}
+func (s *Screen) gridLine(y int) []Cell { return s.grid()[y] }
 
 // clearGridLine blanks one line of the active buffer with the current
 // rendition.
@@ -74,18 +113,20 @@ func (s *Screen) clearGridLine(y int) {
 // clearGrid blanks the active buffer.
 func (s *Screen) clearGrid() {
 	c := s.blank()
-	g := s.grid()
-	for i := range g {
-		g[i] = c
+	for _, line := range s.grid() {
+		for i := range line {
+			line[i] = c
+		}
 	}
 }
 
 // clearAlternate blanks the alternate buffer with the default rendition, as
 // switching to it does.
 func (s *Screen) clearAlternate() {
-	g := s.altGrid
-	for i := range g {
-		g[i] = Cell{Width: 1}
+	for _, line := range s.altGrid {
+		for i := range line {
+			line[i] = Cell{Width: 1}
+		}
 	}
 }
 
@@ -96,6 +137,12 @@ func (s *Screen) setCell(x, y int, c Cell) {
 		return
 	}
 	line := s.gridLine(y)
+	// Replacing one single cell with another touches no wide character
+	// beside it, which is every printable character of ordinary text.
+	if old := line[x]; c.Width == 1 && old.Width == 1 {
+		line[x] = c
+		return
+	}
 	if line[x].Width == 0 && x > 0 {
 		line[x-1] = s.blank()
 	}

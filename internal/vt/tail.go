@@ -18,7 +18,7 @@ func (s *Screen) Tail(lines int) []string {
 	for index := 0; index < total; index++ {
 		var row []Cell
 		if index < len(s.history) {
-			row = s.history[index]
+			row = s.historyLine(index)
 		} else {
 			row = s.BottomRow(index - len(s.history))
 		}

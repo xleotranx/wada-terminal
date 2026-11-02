@@ -331,7 +331,7 @@ func (s *Server) attach(conn net.Conn, reader *bufio.Reader, req Request) {
 	t.mu.Lock()
 	t.screen.SetColors(req.FgRGB, req.BgRGB)
 	t.mu.Unlock()
-	v := &viewer{conn: conn, ch: make(chan []byte, 1024), done: make(chan struct{})}
+	v := &viewer{conn: conn, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	snap, ok := t.attachViewer(v)
 	if !ok {
 		_ = writeFrame(conn, frameExit, frameExitPayload(Exit{Error: "the program has ended"}))

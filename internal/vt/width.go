@@ -9,6 +9,11 @@ import "unicode"
 // extensions, fullwidth forms, and the pictographic blocks terminals render
 // as emoji.
 func runeWidth(r rune) int {
+	// Printable ASCII, which is most of what a terminal draws, is one cell
+	// and takes neither table below.
+	if r >= 0x20 && r < 0x7f {
+		return 1
+	}
 	if r == 0 || isZeroWidth(r) {
 		return 0
 	}
@@ -41,8 +46,10 @@ func runeWidth(r rune) int {
 // isZeroWidth reports whether r is a combining mark or another code point
 // that a terminal draws in the cell of the character before it.
 func isZeroWidth(r rune) bool {
-	if r == 0 {
-		return true
+	// No combining mark or other zero-width code point is below U+0300, so
+	// the Unicode tables are only searched past the ASCII range.
+	if r < 0x300 {
+		return r == 0
 	}
 	if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Mc, r) {
 		return true

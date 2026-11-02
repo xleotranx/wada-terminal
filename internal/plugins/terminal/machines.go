@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"time"
 
@@ -108,10 +109,15 @@ func (t *Plugin) watchMachine(name string, client *core.Client) {
 					terminals[rec.ID] = rec
 				}
 				t.ctx.Post(func() {
-					if conn := t.machineConns[name]; conn != nil && conn.client == client {
-						conn.terminals = terminals
-						conn.err = nil
+					conn := t.machineConns[name]
+					if conn == nil || conn.client != client {
+						return
 					}
+					if conn.err == nil && sameTerminals(conn.terminals, terminals) {
+						return // a poll that found nothing draws nothing
+					}
+					conn.terminals = terminals
+					conn.err = nil
 					t.adoptMachineForegrounds(name, terminals)
 					t.ctx.Invalidate()
 				})
@@ -119,6 +125,10 @@ func (t *Plugin) watchMachine(name string, client *core.Client) {
 		}
 	})
 }
+
+// sameTerminals reports whether two lists of a machine's terminals are the
+// same, so a poll that found nothing changes nothing on screen.
+func sameTerminals(a, b map[int]core.Record) bool { return reflect.DeepEqual(a, b) }
 
 // machineInstance is the instance the saved layout was tied to for a machine.
 func (t *Plugin) machineInstance(name string) string {

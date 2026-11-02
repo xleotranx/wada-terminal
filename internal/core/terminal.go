@@ -23,11 +23,44 @@ import (
 // did.
 type viewer struct {
 	conn net.Conn
-	ch   chan []byte
+	wake chan struct{}
 	done chan struct{}
 	once sync.Once
 	mu   sync.Mutex
 	exit *Exit
+	// pending is output the program wrote that no frame has carried yet;
+	// lastWrite is when the writer last sent one, which tells it whether the
+	// program is streaming and its reads may be gathered.
+	pending   []byte
+	lastWrite time.Time
+}
+
+// push queues what the program wrote for this viewer and wakes the writer. It
+// reports false when the viewer is too far behind: one that stopped reading
+// must not hold the program back, and can attach again for a fresh screen.
+func (v *viewer) push(b []byte) bool {
+	v.mu.Lock()
+	if len(v.pending)+len(b) > maxPending {
+		v.mu.Unlock()
+		return false
+	}
+	v.pending = append(v.pending, b...)
+	v.mu.Unlock()
+	select {
+	case v.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// take gives the writer what is pending and collects the next read in spare,
+// so a stream reuses its buffers instead of allocating a frame each time.
+func (v *viewer) take(spare []byte) []byte {
+	v.mu.Lock()
+	batch := v.pending
+	v.pending = spare
+	v.mu.Unlock()
+	return batch
 }
 
 // close ends the viewer's stream, once.
@@ -145,18 +178,14 @@ func (t *terminal) apply(b []byte) {
 	changed := beforeOK != afterOK || beforeStatus != afterStatus ||
 		beforeTitle != t.screen.Title() || beforeCwd != t.screen.Cwd()
 	replies := t.screen.TakeResponses()
-	data := append([]byte(nil), b...)
 	for v := range t.viewers {
-		select {
-		case v.ch <- data:
-		case <-v.done:
-			delete(t.viewers, v)
-		default:
-			// A viewer that stopped reading must not hold the program
-			// back. It can attach again and get a fresh screen.
-			delete(t.viewers, v)
-			v.close()
+		if v.push(b) {
+			continue
 		}
+		// A viewer that stopped reading must not hold the program back. It
+		// can attach again and get a fresh screen.
+		delete(t.viewers, v)
+		v.close()
 	}
 	t.mu.Unlock()
 	if len(replies) > 0 {
@@ -243,34 +272,68 @@ func (t *terminal) readViewer(v *viewer, r *bufio.Reader) {
 	}
 }
 
+// frameGap is how long a viewer's writer gathers output before sending it as
+// one frame while a program streams: a flood then costs the window a frame
+// every few milliseconds rather than one per read, which is most of both
+// processes' work under output. Output that follows a pause goes at once, so
+// a prompt still appears as soon as it is written.
+const frameGap = 4 * time.Millisecond
+
+// frameFlow is how recently output must have been written for a program to
+// count as streaming.
+const frameFlow = 25 * time.Millisecond
+
+// maxPending bounds the output a viewer may be behind by before it is dropped:
+// its writer reuses the buffer a frame was sent from, so a stream costs no
+// allocation, but one that stops reading must not grow the core's memory.
+const maxPending = 4 << 20
+
 // writeViewer sends queued output until the viewer is done. If the program
 // ended, it sends why; a viewer that fell behind just loses its stream.
 func (t *terminal) writeViewer(v *viewer) {
+	var spare []byte
 	for {
 		select {
-		case data := <-v.ch:
-			if err := writeFrame(v.conn, frameData, data); err != nil {
-				return
-			}
+		case <-v.wake:
 		case <-v.done:
 			// The program may have written just before it ended; deliver
 			// what is queued before saying goodbye.
-			for {
-				select {
-				case data := <-v.ch:
-					if err := writeFrame(v.conn, frameData, data); err != nil {
-						return
-					}
-				default:
-					v.mu.Lock()
-					exit := v.exit
-					v.mu.Unlock()
-					if exit != nil {
-						_ = writeFrame(v.conn, frameExit, frameExitPayload(*exit))
-					}
+			if batch := v.take(spare[:0]); len(batch) > 0 {
+				if err := writeFrame(v.conn, frameData, batch); err != nil {
 					return
 				}
 			}
+			v.mu.Lock()
+			exit := v.exit
+			v.mu.Unlock()
+			if exit != nil {
+				_ = writeFrame(v.conn, frameExit, frameExitPayload(*exit))
+			}
+			return
+		}
+		// While a program streams, let the reads that follow join this
+		// frame; the output after a pause goes at once, so a prompt still
+		// shows as soon as the program writes it.
+		if time.Since(v.lastWrite) < frameFlow {
+			timer := time.NewTimer(frameGap)
+			select {
+			case <-timer.C:
+			case <-v.done:
+			}
+			timer.Stop()
+		}
+		batch := v.take(spare[:0])
+		if len(batch) == 0 {
+			continue
+		}
+		if err := writeFrame(v.conn, frameData, batch); err != nil {
+			return
+		}
+		v.lastWrite = time.Now()
+		if cap(batch) > 1<<20 {
+			spare = nil // a flood's buffer is not worth holding on to
+		} else {
+			spare = batch[:0]
 		}
 	}
 }

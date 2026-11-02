@@ -92,8 +92,8 @@ func (s *Screen) Snapshot() Snapshot {
 		}
 	}
 	snap.History = make([][]Cell, len(s.history))
-	for i, line := range s.history {
-		snap.History[i] = append([]Cell(nil), line...)
+	for i := range s.history {
+		snap.History[i] = append([]Cell(nil), s.historyLine(i)...)
 	}
 	return snap
 }
@@ -107,6 +107,7 @@ func (s *Screen) Restore(snap Snapshot) {
 	s.alternate = snap.Alternate
 	s.mainGrid = restoredGrid(snap.Main, cols, rows)
 	s.altGrid = restoredGrid(snap.Alt, cols, rows)
+	s.freeRows = nil
 	s.mainWrap = restoredFlags(snap.MainWrap, rows)
 	s.altWrap = restoredFlags(snap.AltWrap, rows)
 
@@ -160,13 +161,15 @@ func (s *Screen) Restore(snap Snapshot) {
 	}
 	s.reported = snap.Reported
 
-	s.history = make([][]Cell, 0, len(snap.History))
-	for _, line := range snap.History {
+	history := snap.History
+	if len(history) > historyLimit {
+		history = history[len(history)-historyLimit:]
+	}
+	s.history = make([][]Cell, 0, len(history))
+	for _, line := range history {
 		s.history = append(s.history, append([]Cell(nil), line...))
 	}
-	if len(s.history) > historyLimit {
-		s.history = s.history[len(s.history)-historyLimit:]
-	}
+	s.historyHead = 0
 	s.viewOffset = min(max(snap.ViewOffset, 0), len(s.history))
 
 	s.replies = nil
@@ -175,20 +178,26 @@ func (s *Screen) Restore(snap Snapshot) {
 }
 
 // copyGrid copies a grid so a snapshot never shares cells with the screen.
-func copyGrid(grid []Cell) []Cell {
-	return append([]Cell(nil), grid...)
+func copyGrid(grid [][]Cell) []Cell {
+	if len(grid) == 0 {
+		return nil
+	}
+	out := make([]Cell, 0, len(grid)*len(grid[0]))
+	for _, line := range grid {
+		out = append(out, line...)
+	}
+	return out
 }
 
 // restoredGrid is a snapshot grid at the snapshot's size, padded or cropped
 // and repaired where a wide character lost its other half.
-func restoredGrid(grid []Cell, cols, rows int) []Cell {
+func restoredGrid(grid []Cell, cols, rows int) [][]Cell {
 	out := blankGrid(cols, rows)
 	if len(grid) == cols*rows {
-		copy(out, grid)
 		for y := 0; y < rows; y++ {
-			sanitizeWideLine(out[y*cols : (y+1)*cols])
+			copy(out[y], grid[y*cols:(y+1)*cols])
+			sanitizeWideLine(out[y])
 		}
-		return out
 	}
 	return out
 }

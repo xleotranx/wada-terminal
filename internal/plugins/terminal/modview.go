@@ -544,20 +544,27 @@ func paletteColor(ch chrome, name string, fallback ui.Color) ui.Color {
 }
 
 // startModAnimation wakes the window at 60 Hz while a visible mod asked for
-// animation with api.animate. With no animation it only checks a flag.
+// animation with api.animate, and sleeps until a frame asks again while one
+// did not: an idle window must not tick for an animation that is not there.
 func (t *Plugin) startModAnimation() {
 	t.ctx.Spawn(func(ctx context.Context) {
-		ticker := time.NewTicker(16 * time.Millisecond)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				if t.modAnimated.Load() {
+			case <-t.modAnimatedWake:
+			}
+			ticker := time.NewTicker(16 * time.Millisecond)
+			for t.modAnimated.Load() {
+				select {
+				case <-ctx.Done():
+					ticker.Stop()
+					return
+				case <-ticker.C:
 					t.ctx.PostQuiet(func() { t.ctx.Invalidate() })
 				}
 			}
+			ticker.Stop()
 		}
 	})
 }

@@ -2,6 +2,33 @@ package vt
 
 import "strings"
 
+// runeTexts are the one-character strings of the code points a terminal
+// draws: Latin-1, and the box drawing, block and geometric blocks a TUI
+// paints its frames with. A cell takes its string from here, so a screenful
+// of text costs no allocation per character.
+var runeTexts = func() [512]string {
+	var t [512]string
+	for r := range t {
+		t[r] = string(rune(r))
+	}
+	for r := 0; r < 256; r++ {
+		t[256+r] = string(rune(0x2500 + r))
+	}
+	return t
+}()
+
+// runeText is the string of one code point, from the interned table for the
+// blocks it covers and a fresh one otherwise.
+func runeText(r rune) string {
+	if r >= 0 && r < 256 {
+		return runeTexts[r]
+	}
+	if r >= 0x2500 && r < 0x2600 {
+		return runeTexts[256+r-0x2500]
+	}
+	return string(r)
+}
+
 // LineText is one line as text, spaces where cells are empty and trailing
 // blanks trimmed. Line counts from the oldest history line.
 func (s *Screen) LineText(line int) string {

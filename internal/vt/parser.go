@@ -186,7 +186,7 @@ func (s *Screen) putRune(r rune) {
 	}
 
 	x, y := s.curX, s.curY
-	s.setCell(x, y, Cell{Text: string(r), Style: s.style, Width: uint8(w), Link: s.currentLink})
+	s.setCell(x, y, Cell{Text: runeText(r), Style: s.style, Width: uint8(w), Link: s.currentLink})
 	s.lastX, s.lastY, s.lastValid = x, y, true
 	s.curX += w
 	if s.curX >= s.cols {

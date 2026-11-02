@@ -110,9 +110,11 @@ type Plugin struct {
 	modLogs        map[string][]string
 
 	// Animating mods ask the window to draw at their own pace. A worker
-	// ticks and posts an invalidation only while a frame saw an animation.
+	// ticks and posts an invalidation only while a frame saw an animation,
+	// and sleeps while none does, so an idle window wakes for nothing.
 	modAnimated      atomic.Bool
 	modAnimatedFrame bool
+	modAnimatedWake  chan struct{}
 
 	workspaces []*workspace
 	current    *workspace
@@ -195,6 +197,7 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 	kernel.Contribute(c, shell.Overlays, "terminal.tasks", 15, shell.View{Render: t.taskDialog})
 	kernel.Contribute(c, shell.Overlays, "terminal.finish-task", 20, shell.View{Render: t.finishTaskDialog})
 	t.agentWake = make(chan struct{}, 1)
+	t.modAnimatedWake = make(chan struct{}, 1)
 	t.ctx.Spawn(func(ctx context.Context) { t.watchAgents(ctx) })
 	t.ctx.Spawn(t.watchTaskChanges)
 	t.ctx.Spawn(func(ctx context.Context) { t.watchForegrounds(ctx) })

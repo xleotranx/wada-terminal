@@ -33,7 +33,12 @@ func (t *Plugin) page(c *ui.Context) {
 	if bounds := page.Bounds(); bounds.W > 0 && bounds.H > 0 {
 		t.pageW, t.pageH = bounds.W, bounds.H
 	}
-	t.modAnimated.Store(t.modAnimatedFrame)
+	if t.modAnimated.Swap(t.modAnimatedFrame) != t.modAnimatedFrame {
+		select {
+		case t.modAnimatedWake <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // workspaceView is the column beside the panes: the workspace on show and the

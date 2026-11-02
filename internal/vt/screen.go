@@ -67,6 +67,7 @@ func (s *Screen) resizeCrop(cols, rows int) {
 	wasFullMargin := s.scrollTop == 0 && s.scrollBottom == oldRows-1
 	s.mainGrid = resizeGrid(s.mainGrid, oldCols, oldRows, cols, rows)
 	s.altGrid = resizeGrid(s.altGrid, oldCols, oldRows, cols, rows)
+	s.freeRows = nil
 	s.mainWrap = resizeFlags(s.mainWrap, oldRows, rows)
 	s.altWrap = resizeFlags(s.altWrap, oldRows, rows)
 	s.cols, s.rows = cols, rows
@@ -137,7 +138,7 @@ func (s *Screen) rowAtFrom(y, offset int) []Cell {
 		if index < 0 {
 			return nil
 		}
-		return s.history[index]
+		return s.historyLine(index)
 	}
 	gridY := index - len(s.history)
 	if gridY < 0 || gridY >= s.rows {
@@ -307,12 +308,28 @@ func (s *Screen) scrollUp(top, bottom, n int, pushHistory bool) {
 	if n > height {
 		n = height
 	}
-	if pushHistory && top == 0 && bottom == s.rows-1 && !s.alternate {
-		for i := 0; i < n; i++ {
-			s.pushHistory(s.gridLine(top + i))
-		}
-	}
 	flags := s.wrapFlags()
+	if top == 0 && bottom == s.rows-1 {
+		rows := s.grid()
+		for i := 0; i < n; i++ {
+			if pushHistory && !s.alternate {
+				if old := s.takeHistoryLine(rows[i]); old != nil {
+					s.keepRow(old)
+				}
+				continue
+			}
+			s.keepRow(rows[i])
+		}
+		copy(rows, rows[n:])
+		for y := s.rows - n; y < s.rows; y++ {
+			rows[y] = s.takeRow()
+		}
+		copy(flags, flags[n:])
+		for y := s.rows - n; y < s.rows; y++ {
+			flags[y] = false
+		}
+		return
+	}
 	for y := top; y <= bottom-n; y++ {
 		copy(s.gridLine(y), s.gridLine(y+n))
 		flags[y] = flags[y+n]
@@ -331,6 +348,22 @@ func (s *Screen) scrollDown(top, bottom, n int) {
 	if n > height {
 		n = height
 	}
+	if top == 0 && bottom == s.rows-1 {
+		rows := s.grid()
+		for y := s.rows - n; y < s.rows; y++ {
+			s.keepRow(rows[y])
+		}
+		copy(rows[n:], rows)
+		for y := 0; y < n; y++ {
+			rows[y] = s.takeRow()
+		}
+		flags := s.wrapFlags()
+		copy(flags[n:], flags)
+		for y := 0; y < n; y++ {
+			flags[y] = false
+		}
+		return
+	}
 	flags := s.wrapFlags()
 	for y := bottom; y >= top+n; y-- {
 		copy(s.gridLine(y), s.gridLine(y-n))
@@ -342,15 +375,55 @@ func (s *Screen) scrollDown(top, bottom, n int) {
 	}
 }
 
+// pushHistory copies a line into the scrollback, which keeps at most
+// historyLimit lines. Once it is full, a new line overwrites the oldest, so a
+// scroll never shifts the ring.
 func (s *Screen) pushHistory(line []Cell) {
-	cp := make([]Cell, len(line))
-	copy(cp, line)
-	s.history = append(s.history, cp)
-	if len(s.history) > historyLimit {
-		drop := len(s.history) - historyLimit
-		copy(s.history, s.history[drop:])
-		s.history = s.history[:historyLimit]
+	if len(s.history) < historyLimit {
+		cp := make([]Cell, len(line))
+		copy(cp, line)
+		s.history = append(s.history, cp)
+	} else {
+		slot := s.historyHead
+		cp := s.history[slot]
+		if len(cp) != len(line) {
+			cp = make([]Cell, len(line)) // a line of another width, from before a resize
+		}
+		copy(cp, line)
+		s.history[slot] = cp
+		s.historyHead = (slot + 1) % len(s.history)
 	}
+	s.afterHistoryLine()
+}
+
+// takeHistoryLine puts a grid row into the scrollback as it is, and returns
+// the row the scrollback dropped, or nil before it is full. The history owns
+// the line afterwards: the caller must not keep using it.
+func (s *Screen) takeHistoryLine(line []Cell) []Cell {
+	if len(s.history) < historyLimit {
+		s.history = append(s.history, line)
+		s.afterHistoryLine()
+		return nil
+	}
+	slot := s.historyHead
+	old := s.history[slot]
+	s.history[slot] = line
+	s.historyHead = (slot + 1) % len(s.history)
+	s.afterHistoryLine()
+	return old
+}
+
+// historyLine is line i of the scrollback, 0 the oldest.
+func (s *Screen) historyLine(i int) []Cell {
+	if n := len(s.history); n > 0 {
+		return s.history[(s.historyHead+i)%n]
+	}
+	return nil
+}
+
+// afterHistoryLine keeps a scrolled view on the lines it showed when one
+// scrolls in.
+func (s *Screen) afterHistoryLine() {
 	if s.viewOffset > 0 {
 		s.viewOffset++
 		if s.viewOffset > len(s.history) {
@@ -361,6 +434,7 @@ func (s *Screen) pushHistory(line []Cell) {
 
 func (s *Screen) clearHistory() {
 	s.history = nil
+	s.historyHead = 0
 	s.viewOffset = 0
 }
 
@@ -719,6 +793,7 @@ func (s *Screen) fullReset() {
 	s.alternate = false
 	s.mainGrid = blankGrid(s.cols, s.rows)
 	s.altGrid = blankGrid(s.cols, s.rows)
+	s.freeRows = nil
 	s.mainWrap = make([]bool, s.rows)
 	s.altWrap = make([]bool, s.rows)
 	s.clearHistory()

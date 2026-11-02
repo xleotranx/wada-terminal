@@ -439,11 +439,13 @@ func (t *Plugin) detectAgent(s *session) {
 }
 
 // adoptAgent chooses an agent entry from the foreground program first, then
-// the window title. A chosen agent or a 7501 reporter is never overridden.
-func (t *Plugin) adoptAgent(s *session) {
+// the window title. A chosen agent or a 7501 reporter is never overridden. It
+// reports whether it changed what the pane shows of its program.
+func (t *Plugin) adoptAgent(s *session) bool {
 	if s == nil || (s.agent && !s.detected) {
-		return
+		return false
 	}
+	before, beforeGlyph := s.agent, s.agentGlyph
 	id, def, ok := t.matchAgent(s.foreground)
 	if !ok {
 		id, def, ok = t.matchAgent(s.screen.Title())
@@ -451,12 +453,11 @@ func (t *Plugin) adoptAgent(s *session) {
 	if ok {
 		s.agent, s.detected, s.agentID = true, true, id
 		s.agentGlyph, s.agentColor = def.Glyph, def.Color
-		return
-	}
-	if s.detected {
+	} else if s.detected {
 		s.agent, s.detected, s.agentID = false, false, ""
 		s.agentGlyph, s.agentColor = "", ""
 	}
+	return s.agent != before || s.agentGlyph != beforeGlyph
 }
 
 // matchAgent finds the programs.json entry whose match names a program.
@@ -477,8 +478,10 @@ func (t *Plugin) matchAgent(name string) (string, config.Agent, bool) {
 
 // scanForegrounds checks what each local pane's terminal is running now and
 // adopts an agent whose programs.json match names it. It runs on the UI
-// thread, from a posted scan, never inside a frame.
+// thread, from a posted scan, never inside a frame. A scan that finds nothing
+// new asks for no frame: polling every second must not cost a redraw.
 func (t *Plugin) scanForegrounds() {
+	changed := false
 	for _, s := range t.allSessions() {
 		if s == nil || s.proc == nil || !s.alive {
 			continue
@@ -488,7 +491,14 @@ func (t *Plugin) scanForegrounds() {
 			continue
 		}
 		s.foreground = name
-		t.adoptAgent(s)
+		if t.adoptAgent(s) {
+			changed = true
+		}
+	}
+	if changed {
+		t.ctx.Invalidate()
+	} else {
+		t.ctx.FrameDue()
 	}
 }
 
@@ -501,7 +511,7 @@ func (t *Plugin) watchForegrounds(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.ctx.Post(t.scanForegrounds)
+			t.ctx.PostQuiet(t.scanForegrounds)
 		}
 	}
 }

@@ -65,7 +65,7 @@ func (s *Screen) lineAt(line int) []Cell {
 		return nil
 	}
 	if line < len(s.history) {
-		return s.history[line]
+		return s.historyLine(line)
 	}
 	return s.BottomRow(line - len(s.history))
 }

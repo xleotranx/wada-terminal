@@ -89,8 +89,8 @@ type Cursor struct {
 type Screen struct {
 	cols, rows int
 
-	mainGrid  []Cell
-	altGrid   []Cell
+	mainGrid  [][]Cell
+	altGrid   [][]Cell
 	alternate bool
 	// mainWrap and altWrap mark the lines that continue on the next one,
 	// which resizing re-wraps: a line ends at a newline, not at the margin.
@@ -143,7 +143,15 @@ type Screen struct {
 	reported      bool
 	pendingStatus []Status
 
-	history    [][]Cell
+	// history keeps the lines that scrolled off the main screen, oldest
+	// first. It is a ring: once it holds historyLimit lines, historyHead is
+	// the oldest and a new line overwrites it, so a scroll never shifts the
+	// whole scrollback.
+	history     [][]Cell
+	historyHead int
+	// freeRows are blank rows a scroll reuses instead of allocating cells
+	// again, so a program that streams output does not churn the heap.
+	freeRows   [][]Cell
 	viewOffset int
 
 	ps parser
