@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strings"
 
 	"wada-terminal/internal/control"
 
@@ -177,7 +178,7 @@ func (t *Plugin) controlList() control.List {
 // controlSpace is one space, with its tabs and their panes.
 func (t *Plugin) controlSpace(w *workspace) control.Space {
 	space := control.Space{ID: w.id, Name: w.name, Folder: w.dir, Machine: w.machine,
-		Tabs: make([]control.Tab, 0, len(w.tabs))}
+		Tabs: make([]control.Tab, 0, len(w.tabs)), Task: w.task}
 	space.Active = w == t.current
 	for i, tb := range w.tabs {
 		tab := control.Tab{Index: i + 1, Active: i == w.active,
@@ -255,6 +256,49 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		}
 		return map[string]any{"stack": stack, "active": shown}, nil
 
+	case "task.new":
+		name, _ := control.String(args, "name")
+		folder, _ := control.String(args, "folder")
+		agent, _ := control.String(args, "agent")
+		if agent == "" {
+			agent = "shell"
+		}
+		if err := t.createTask(name, folder, agent); err != nil {
+			return nil, err
+		}
+		return map[string]any{"started": true}, nil
+	case "task.finish":
+		if t.current == nil || t.current.task == nil {
+			return nil, fmt.Errorf("select a task workspace first")
+		}
+		t.openFinishTask(t.current)
+		return map[string]any{"confirmation": true}, nil
+	case "task.review":
+		if t.current == nil || t.current.task == nil {
+			return nil, fmt.Errorf("select a task workspace first")
+		}
+		if t.current.review == nil {
+			t.current.review = &taskReview{}
+		}
+		t.current.review.changesView = true
+		t.reviewTask(t.current)
+		return map[string]any{"started": true}, nil
+	case "task.check":
+		if t.current == nil || t.current.task == nil {
+			return nil, fmt.Errorf("select a task workspace first")
+		}
+		if t.current.finishing {
+			return nil, fmt.Errorf("task is finishing")
+		}
+		if t.current.review != nil && t.current.review.checkJob.Running() {
+			return nil, fmt.Errorf("a check is already running for this task")
+		}
+		command, _ := control.String(args, "command")
+		if strings.TrimSpace(command) == "" {
+			return nil, fmt.Errorf("enter a check command")
+		}
+		t.checkTask(t.current, command)
+		return map[string]any{"started": true}, nil
 	case "space.new":
 		machine, _ := control.String(args, "machine")
 		if machine == "local" {
@@ -286,6 +330,10 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		}
 		if w == nil {
 			return nil, fmt.Errorf("no space")
+		}
+		if w.task != nil {
+			t.openFinishTask(w)
+			return map[string]any{"space": w.id, "confirmation": true}, nil
 		}
 		if len(t.workspaces) <= 1 {
 			return nil, fmt.Errorf("keep one space")

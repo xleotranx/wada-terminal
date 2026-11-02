@@ -54,11 +54,13 @@ workspace menu, so a capture can show a split, the index or the menu), and
   step between them, and the app remembers them between runs. The first run
   opens the folder the app was started in, with your home folder beside it.
   `⌘B` hides the column.
-- **Tabs, one level** — under a `TABS` label, one row per tab, named after the
-  pane you are in. A tab that splits shows its focused pane with the others
-  nested under it behind a rail, and a dot or a word says what each program is
-  doing: an agent that waits for you says `needs you`. The foot of the column
-  opens a tab (`⌘T`) and the Sessions.
+- **Terminals, one list** — the sidebar lists every terminal in screen order.
+  Split peers have equal rows under a neutral `Split …` header with a pane count;
+  focusing another pane keeps the header and order stable. Arrangement names are
+  saved with the layout. The horizontal tab strip is hidden while the workspace
+  sidebar is visible, and returns when `⌘B` hides it (or a custom layout omits
+  the workspace column). Explicit `tabs` layout blocks remain available.
+  `New terminal` (`⌘T`) opens a tab; `All terminals` opens the Sessions.
 - **The Sessions** — `⌘⇧I`, the View menu or the row at the foot of the
   column opens an index of every session in the window, across workspaces, tabs
   and splits: its program, folder, tab and state. The session that needs you is
@@ -277,3 +279,58 @@ go tool mygo vet .
 ```
 
 The pseudo-terminal tests open `/dev/ptmx`, which a restricted sandbox may deny.
+
+## Task workspaces
+
+`New task…` in the sidebar or File menu (`⌘⇧T`) creates a named task from a
+local Git repository. Choose a built-in agent, a program from `agents.json` or
+`programs.json`, or a shell. Wada creates a new branch and worktree from
+committed HEAD under its data folder's `tasks/` directory. Uncommitted source
+changes are left in their original checkout. A repository needs a commit;
+remote task creation is not supported yet.
+
+Tasks in the same repository appear together in the sidebar. Their terminals,
+splits, task name, branch, starting commit and last check survive reopening the
+window. `Terminal` returns to the agent; `Send task` submits the task name as a
+prompt when the focused agent is ready. This action is disabled for ordinary
+shells. Agent startup uses the agent's existing authentication and configuration.
+
+`Changes` reviews the task against its starting commit, including later commits,
+staged and unstaged edits and untracked text files. It refreshes every two seconds
+while visible. Reviews and command output have bounded previews; large files are identified; tracked binary changes use Git’s binary-patch
+representation and untracked binaries are labelled. `Refresh changes` also works
+on demand. Task status uses explicit program reports: **Working**, **Needs you**
+or **Ready to review**; without a report it says **Open**, never guessed success.
+`Finish task…` opens the completion and cleanup dialog.
+
+Enter an explicit shell command such as `go test ./...` and click `Run check`.
+The command runs in the task worktree, with a two-minute limit, and the receipt
+shows its command, timestamp, actual exit code and output. The default is
+`Not run`. A changed review snapshot marks an old check as unverified. Checks do
+not automatically merge, commit, approve agent commands, or declare a task done.
+`Finish task…` saves ordinary changed files as a commit on the task branch,
+stops its terminals, and removes its temporary folder and sidebar entry. If
+there is nothing to save, use `Finish task`. You can explicitly choose to discard
+unsaved changes instead. Ignored local files are listed and need a separate
+acknowledgment because Git does not save them. Unmerged commits keep their branch
+for recovery; branches already merged into the original checkout are removed.
+The original project is unchanged; applying a task branch remains separate.
+Cancel leaves files and terminals alone. A failed save or cleanup retains the task
+and explains the problem. Closing a task from its menu opens the same finish
+dialog. Closing only the window keeps core-owned terminals running.
+After a lost core, restored panes are fresh shells, as with ordinary workspaces.
+
+The window API also accepts asynchronous task actions:
+
+```sh
+wada-terminal do task.new --name "Fix login redirect" --folder /path/to/repo --agent opencode
+wada-terminal ls
+wada-terminal do task.review
+wada-terminal do task.finish  # opens confirmation in the app; does not delete by itself
+wada-terminal do task.check --command "go test ./..."
+```
+
+`task.new` returns `started`, not a completed task. Inspect `status` or `ls` for
+the new space's `task` metadata; creation failures open the task dialog with the
+error. Select the intended task space before review/check actions. `task.check`
+retains its result in that metadata when finished.

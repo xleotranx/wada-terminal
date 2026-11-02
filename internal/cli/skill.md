@@ -231,3 +231,19 @@ their screen.
   this sidebar when made with `space.new --machine`; a remote core's own
   layout does not. `stop` in a template is stored but unused; read a child's
   screen with `core read` when you need the full output.
+
+## Task workspaces
+
+When asked to create isolated task work, use `do task.new --name "Task name"
+--folder /absolute/repository --agent opencode` (or `shell`, `claude`, `codex`,
+`custom:ID`). It starts asynchronously; inspect `status`/`ls` for the new space's
+`task` metadata. Errors open the task dialog. Task creation starts from committed
+HEAD, leaves source edits untouched, and keeps the worktree when the window closes. Finishing a task uses the app’s
+confirmation dialog: `do task.finish` opens it but cannot confirm deletion.
+The person can save changes and clean up, or explicitly discard unsaved files.
+Unmerged commits retain a recovery branch; the working folder and task entry
+are removed after successful confirmation.
+Select the intended space using its id before `do task.review` or `do task.check
+--command "go test ./..."`. Checks are explicit commands, executed in the task
+worktree with retained exit code/output and snapshot evidence. Never run checks
+or send task prompts without the person's authorization. No automatic merge.

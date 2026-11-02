@@ -26,6 +26,13 @@ type Action struct {
 // Actions is every action the window accepts, in the order the command list
 // prints them. A mod or a new feature adds one here and a case in the window.
 var Actions = []Action{
+	{Name: "task.finish", Description: "Open the Finish task confirmation; only the person can confirm saving or discarding and cleanup."},
+	{Name: "task.new", Description: "Create a local isolated task asynchronously. Inspect status/ls for the resulting space; creation errors open the task dialog.", Args: []Arg{
+		{Name: "name", Type: "string", Required: true, Description: "Task name."},
+		{Name: "folder", Type: "string", Required: true, Description: "Local Git repository."},
+		{Name: "agent", Type: "string", Description: "shell (default), claude, codex, opencode or custom:ID."}}},
+	{Name: "task.review", Description: "Show and refresh the current task's changes."},
+	{Name: "task.check", Description: "Run an explicit command in the current task asynchronously and retain its result.", Args: []Arg{{Name: "command", Type: "string", Required: true, Description: "Shell command authored by the user."}}},
 	{Name: "layout.resize", Description: "Set the pixel size of a fixed-size layout block.",
 		Args: []Arg{
 			{Name: "id", Type: "string", Description: "The block's id."},
@@ -47,7 +54,7 @@ var Actions = []Action{
 			{Name: "name", Type: "string", Description: "Its label; default the folder's name."},
 			{Name: "machine", Type: "string", Description: "Run its terminals on this machine from machines.json; default this computer."},
 		}},
-	{Name: "space.close", Description: "Close a space and end its terminals.",
+	{Name: "space.close", Description: "Close a space and end its terminals. Tasks open the Finish task confirmation.",
 		Args: []Arg{{Name: "id", Type: "int", Description: "The space; default the one on show."}}},
 	{Name: "space.select", Description: "Show a space.",
 		Args: []Arg{

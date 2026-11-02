@@ -69,3 +69,15 @@ func TestMouseMods(t *testing.T) {
 		t.Fatalf("mods = %d, want %d", got, 8|16)
 	}
 }
+
+func TestEndedSessionDoesNotReportMouse(t *testing.T) {
+	s := &session{screen: vt.New(8, 4)}
+	s.screen.Write([]byte("\x1b[?1003h\x1b[?1006h"))
+	if _, on := s.mouseReporting(ui.InputEvent{}); on {
+		t.Fatal("ended session still sends hover reports")
+	}
+	s.alive = true
+	if _, on := s.mouseReporting(ui.InputEvent{}); !on {
+		t.Fatal("live program lost requested mouse reporting")
+	}
+}

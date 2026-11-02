@@ -1,5 +1,7 @@
 package control
 
+import "wada-terminal/internal/tasks"
+
 // Status is what `status` says about the open window.
 type Status struct {
 	Window       bool                  `json:"window"`
@@ -22,12 +24,13 @@ type Status struct {
 
 // Space is one space (a workspace in the code) and its tabs.
 type Space struct {
-	ID      int    `json:"id"`
-	Name    string `json:"name"`
-	Folder  string `json:"folder"`
-	Machine string `json:"machine,omitempty"`
-	Active  bool   `json:"active"`
-	Tabs    []Tab  `json:"tabs"`
+	Task    *tasks.Task `json:"task,omitempty"`
+	ID      int         `json:"id"`
+	Name    string      `json:"name"`
+	Folder  string      `json:"folder"`
+	Machine string      `json:"machine,omitempty"`
+	Active  bool        `json:"active"`
+	Tabs    []Tab       `json:"tabs"`
 }
 
 // Tab is one tab of a space.

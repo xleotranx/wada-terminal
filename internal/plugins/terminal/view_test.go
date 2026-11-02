@@ -6,18 +6,16 @@ import (
 	"wada-terminal/internal/vt"
 )
 
-// TestTabTitleFollowsFocus checks that a tab names the pane on show, not the
-// one it opened with.
-func TestTabTitleFollowsFocus(t *testing.T) {
-	a := &session{name: "Claude Code", screen: vt.New(4, 2)}
-	b := &session{name: "Shell", screen: vt.New(4, 2)}
-	tb := &tab{root: leafOf(a), focus: a}
-	if got := tabTitle(tb); got != "Claude Code" {
-		t.Fatalf("tab title = %q", got)
-	}
+// A split names its arrangement rather than promoting the focused terminal.
+func TestSplitTitleSurvivesFocusChange(t *testing.T) {
+	a := &session{name: "OpenCode", screen: vt.New(4, 2)}
+	b := &session{name: "Codex", screen: vt.New(4, 2)}
+	root, _ := splitAt(leafOf(a), a, b, false)
+	tb := &tab{id: 7, root: root, focus: a}
+	before := tabTitle(tb)
 	tb.focus = b
-	if got := tabTitle(tb); got != "Shell" {
-		t.Fatalf("tab title after focusing the other pane = %q", got)
+	if got := tabTitle(tb); got != before || got == "Codex" || got == "OpenCode" {
+		t.Fatalf("split title changed from %q to %q", before, got)
 	}
 }
 
@@ -90,5 +88,24 @@ func TestRollupLabel(t *testing.T) {
 		if got := rollupLabel(tc.st, tc.n); got != tc.want {
 			t.Errorf("rollupLabel(%v, %d) = %q, want %q", tc.st, tc.n, got, tc.want)
 		}
+	}
+}
+
+// Saved split names survive a changed runtime id; single terminals retain
+// their live program titles instead of freezing a title at save time.
+func TestSavedArrangementNames(t *testing.T) {
+	a := &session{name: "OpenCode", screen: vt.New(4, 2)}
+	b := &session{name: "Codex", screen: vt.New(4, 2)}
+	root, _ := splitAt(leafOf(a), a, b, false)
+	tb := &tab{id: 7, root: root, focus: a}
+	p := &Plugin{workspaces: []*workspace{{tabs: []*tab{tb}}}}
+	saved := p.workspaceSpecs()[0].Tabs[0]
+	restored := &tab{id: 99, name: saved.Name, root: root, focus: b}
+	if saved.Name == "" || tabTitle(restored) != tabTitle(tb) {
+		t.Fatal("split name was not preserved")
+	}
+	tb.root = leafOf(a)
+	if got := p.workspaceSpecs()[0].Tabs[0].Name; got != "" {
+		t.Fatalf("single terminal title frozen as %q", got)
 	}
 }

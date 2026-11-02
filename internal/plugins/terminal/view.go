@@ -55,6 +55,7 @@ func (t *Plugin) workspaceView(c *ui.Context, ch chrome, position blockPosition)
 		Children(func() {
 			t.workspaceSwitcher(c, ch)
 			t.workspacePathLine(c, ch)
+			t.taskList(c, ch)
 			t.tabSection(c, ch)
 			t.sidebarFooter(c, ch)
 		})
@@ -128,6 +129,7 @@ func (t *Plugin) workspaceMenuPanel(c *ui.Context, ch chrome, anchor, panel ui.E
 			})
 		})
 		ui.Box(c).Height(1).FillWidth().Background(pal.Hairline).Margin(4, 0, 4, 0)
+		t.menuActionRow(c, ch, "New task…", "⌘⇧T", func() { t.workspaceMenu = false; t.openTaskDialog() })
 		t.menuActionRow(c, ch, "New workspace…", "⌘⇧N", func() {
 			t.workspaceMenu = false
 			t.pickWorkspace()
@@ -163,7 +165,11 @@ func (t *Plugin) workspaceMenuRow(c *ui.Context, ch chrome, w *workspace) {
 				t.closeWorkspaceButton(c, ch, w)
 				return
 			}
-			t.workspaceMenuMeta(c, ch, w)
+			if w.task != nil {
+				ui.Text(c, taskStatus(w)).FontSize(10).TextColor(pal.Muted).Shrink(0)
+			} else {
+				t.workspaceMenuMeta(c, ch, w)
+			}
 		})
 	})
 	row.OnClick(func() {
@@ -256,17 +262,17 @@ func (t *Plugin) tabSection(c *ui.Context, ch chrome) {
 	w := t.current
 	ui.Row(c).Height(18).FillWidth().Shrink(0).Margin(9, 0, 0, 0).Padding(0, 7).
 		AlignItems(ui.Center).Children(func() {
-		ui.Text(c, "TABS").FontSize(9.5).FontWeight(600).LetterSpacing(0.6).
+		ui.Text(c, "TERMINALS").FontSize(9.5).FontWeight(600).LetterSpacing(0.6).
 			TextColor(pal.Faint).Grow(1).SingleLine()
 		if w != nil && len(w.tabs) > 0 {
-			ui.Text(c, strconv.Itoa(len(w.tabs))).FontSize(9.5).TextColor(pal.Faint).
+			ui.Text(c, strconv.Itoa(len(w.sessions(nil)))).FontSize(9.5).TextColor(pal.Faint).
 				Shrink(0)
 		}
 	})
 	ui.Scroll(c).Grow(1).FillWidth().MinHeight(0).Children(func() {
 		ui.Column(c).FillWidth().Gap(1).Children(func() {
 			if w == nil || len(w.tabs) == 0 {
-				ui.Text(c, "No tabs open").FontSize(11).TextColor(pal.Faint).
+				ui.Text(c, "No terminals open").FontSize(11).TextColor(pal.Faint).
 					Padding(4, 7)
 				return
 			}
@@ -283,8 +289,9 @@ func (t *Plugin) sidebarFooter(c *ui.Context, ch chrome) {
 	pal := ch.pal
 	ui.Column(c).FillWidth().Shrink(0).Gap(1).Children(func() {
 		ui.Box(c).Height(1).FillWidth().Background(pal.Hairline).Margin(7, 2, 7, 2)
-		t.footerAction(c, ch, "+", "New tab", "⌘T", func() { t.newTab(kindShell) })
-		t.footerAction(c, ch, "⌗", "Sessions", "⌘⇧I", t.openIndex)
+		t.footerAction(c, ch, "+", "New task…", "⌘⇧T", t.openTaskDialog)
+		t.footerAction(c, ch, "+", "New terminal", "⌘T", func() { t.newTab(kindShell) })
+		t.footerAction(c, ch, "⌗", "All terminals", "⌘⇧I", t.openIndex)
 	})
 }
 
@@ -386,8 +393,8 @@ func (t *Plugin) selectWorkspace(w *workspace) {
 	t.seen(w.focus)
 }
 
-// tabTree draws one tab: its row when it holds one pane, or the focused pane
-// and, under it behind a rail, the other panes of the split.
+// tabTree lists terminals in screen order. A neutral header and shared rail
+// identify a split arrangement; neither terminal is promoted above its peers.
 func (t *Plugin) tabTree(c *ui.Context, ch chrome, w *workspace, i int, tb *tab) {
 	panes := tb.root.sessions(nil)
 	if len(panes) == 0 {
@@ -395,100 +402,53 @@ func (t *Plugin) tabTree(c *ui.Context, ch chrome, w *workspace, i int, tb *tab)
 	}
 	active := i == w.active
 	if len(panes) == 1 {
-		t.treeRow(c, ch, panes[0], active && w.focus == panes[0], false)
+		t.treeRow(c, ch, panes[0], active && w.focus == panes[0])
 		return
 	}
-	focused := tb.focus
-	if focused == nil {
-		focused = panes[0]
-	}
-	t.groupRow(c, ch, tb, focused, active)
-	// The other panes sit behind a rail: an indent of their own, then a box
-	// whose left border runs down them, so the row cannot grow past the
-	// column's edge.
-	ui.Row(c).FillWidth().Shrink(0).Children(func() {
-		ui.Box(c).Width(14).Shrink(0)
-		ui.Box(c).Grow(1).MinWidth(0).BorderWidth(0, 0, 0, 1).
-			BorderColor(ch.pal.Hairline).Padding(0, 0, 0, 6).Children(func() {
-			ui.Column(c).FillWidth().Gap(1).Children(func() {
-				for _, s := range panes {
-					if s != focused {
-						t.treeRow(c, ch, s, active && w.focus == s, true)
-					}
-				}
-			})
+	t.groupRow(c, ch, tb)
+	ui.Box(c).FillWidth().Shrink(0).BorderWidth(0, 0, 0, 1).
+		BorderColor(ch.pal.Hairline).Margin(0, 0, 5, 7).Padding(0, 0, 0, 5).Children(func() {
+		ui.Column(c).FillWidth().Gap(1).Children(func() {
+			for _, s := range panes {
+				t.treeRow(c, ch, s, active && w.focus == s)
+			}
 		})
 	})
 }
 
-// treeRow is one pane in the tabs: its icon, its title, and what its program
-// is doing. A pane under a split is smaller: the rail above says it belongs to
-// the tab it sits under.
-func (t *Plugin) treeRow(c *ui.Context, ch chrome, s *session, selected, child bool) {
+// treeRow gives every terminal the same visual weight, including split peers.
+func (t *Plugin) treeRow(c *ui.Context, ch chrome, s *session, selected bool) {
 	pal := ch.pal
-	height, radius := float32(30), float32(7)
-	if child {
-		height, radius = 26, 6
-	}
-	row := ui.Box(c).Height(height).FillWidth().Shrink(0).Radius(radius).Padding(0, 8)
+	row := ui.Box(c).Height(32).FillWidth().Shrink(0).Radius(6).Padding(0, 8)
 	switch {
 	case selected:
 		row.Background(pal.Selected)
 	case row.Hovered():
 		row.Background(pal.Hover)
 	}
-	row.Cursor(ui.CursorPointer)
-	row.Children(func() {
+	row.Cursor(ui.CursorPointer).Children(func() {
 		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(8).Children(func() {
-			size := float32(17)
-			if child {
-				size = 14
-			}
-			t.sessionIcon(c, ch, s, size)
-			color := pal.Text
-			if child && !selected {
-				color = pal.Muted
-			}
-			fontSize := float32(12.5)
-			if child {
-				fontSize = 11.5
-			}
-			ui.Text(c, s.title()).FontSize(fontSize).TextColor(color).SingleLine().Ellipsis("…").
-				Shrink(1).MinWidth(0).Grow(1)
+			t.sessionIcon(c, ch, s, 17)
+			ui.Text(c, s.title()).FontSize(12.5).TextColor(pal.Text).SingleLine().Ellipsis("…").Shrink(1).MinWidth(0).Grow(1)
 			t.sessionBadge(c, ch, s, selected)
 		})
 	})
 	row.OnClick(func() { t.focusOn(s) })
 }
 
-// groupRow is the row of a tab that splits: the layout it has, the pane the
-// window shows, how many panes it holds, and whether that pane runs.
-func (t *Plugin) groupRow(c *ui.Context, ch chrome, tb *tab, focused *session, active bool) {
+// groupRow names the arrangement, independently of the terminal with focus.
+func (t *Plugin) groupRow(c *ui.Context, ch chrome, tb *tab) {
 	pal := ch.pal
-	row := ui.Box(c).Height(30).FillWidth().Shrink(0).Radius(7).Padding(0, 8)
-	switch {
-	case active:
-		row.Background(pal.Selected)
-	case row.Hovered():
-		row.Background(pal.Hover)
-	}
-	row.Cursor(ui.CursorPointer)
+	row := ui.Box(c).Height(27).FillWidth().Shrink(0).Padding(0, 8).Margin(5, 0, 0, 0)
 	row.Children(func() {
-		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(8).Children(func() {
+		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(7).Children(func() {
 			t.layoutMark(c, ch, tb)
-			t.sessionIcon(c, ch, focused, 17)
-			ui.Text(c, focused.title()).FontSize(12.5).TextColor(pal.Text).SingleLine().
-				Ellipsis("…").Shrink(1).MinWidth(0).Grow(1)
-			if n := len(tb.root.sessions(nil)); n > 1 {
-				ui.Box(c).Height(15).Padding(0, 5).Radius(4).Shrink(0).Background(pal.Raised).Center().
-					Children(func() {
-						ui.Text(c, strconv.Itoa(n)).FontSize(9.5).TextColor(pal.Muted)
-					})
-			}
-			t.sessionBadge(c, ch, focused, true)
+			ui.Text(c, tabTitle(tb)).FontSize(11).FontWeight(600).TextColor(pal.Muted).
+				SingleLine().Ellipsis("…").Grow(1).MinWidth(0)
+			ui.Text(c, strconv.Itoa(len(tb.root.sessions(nil)))+" panes").FontSize(10).TextColor(pal.Muted).Shrink(0)
 		})
 	})
-	row.OnClick(func() { t.focusOn(focused) })
+	row.Cursor(ui.CursorPointer).OnClick(func() { t.focusOn(tb.focus) })
 }
 
 // layoutMark draws how a split tab puts its panes: two columns side by side,
@@ -740,9 +700,15 @@ func (t *Plugin) tabButton(c *ui.Context, ch chrome, w *workspace, i int, tb *ta
 	btn.OnClick(func() { t.selectTab(i) })
 }
 
-// tabTitle is the name of a tab: the pane the window shows, so the tab names
-// what the user is working in rather than what it opened with.
+// tabTitle names split arrangements independently of focus. A single terminal
+// continues to follow its program title unless the arrangement was named.
 func tabTitle(tb *tab) string {
+	if tb.name != "" {
+		return tb.name
+	}
+	if len(tb.root.sessions(nil)) > 1 {
+		return "Split view"
+	}
 	if tb.focus != nil {
 		return tb.focus.title()
 	}
@@ -778,7 +744,7 @@ func (t *Plugin) attentionButton(c *ui.Context, ch chrome, st agentState, n int)
 	btn.Children(func() {
 		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(5).Children(func() {
 			ui.Box(c).Width(6).Height(6).Radius(3).Shrink(0).Background(color)
-			ui.Text(c, strconv.Itoa(n)).FontSize(10.5).FontWeight(600).TextColor(color)
+			ui.Text(c, rollupLabel(st, n)).FontSize(10.5).FontWeight(600).TextColor(color)
 		})
 	})
 	btn.OnClick(t.openIndex)

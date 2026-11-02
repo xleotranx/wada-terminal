@@ -2,9 +2,11 @@ package terminal
 
 import (
 	"path/filepath"
+	"strconv"
 
 	"wada-terminal/internal/config"
 	"wada-terminal/internal/core"
+	"wada-terminal/internal/tasks"
 	"wada-terminal/internal/vt"
 )
 
@@ -14,16 +16,18 @@ import (
 // a new one. Older saved data has only a name and folder: such a workspace
 // opens with one shell, as it did before the core existed.
 type workspaceSpec struct {
-	Name    string    `json:"name"`
-	Dir     string    `json:"dir"`
-	Machine string    `json:"machine,omitempty"`
-	Color   int       `json:"color,omitempty"`
-	Active  int       `json:"active,omitempty"`
-	Tabs    []tabSpec `json:"tabs,omitempty"`
+	Task    *tasks.Task `json:"task,omitempty"`
+	Name    string      `json:"name"`
+	Dir     string      `json:"dir"`
+	Machine string      `json:"machine,omitempty"`
+	Color   int         `json:"color,omitempty"`
+	Active  int         `json:"active,omitempty"`
+	Tabs    []tabSpec   `json:"tabs,omitempty"`
 }
 
 // tabSpec is one tab: its split tree and the terminal with the keyboard.
 type tabSpec struct {
+	Name   string    `json:"name,omitempty"`
 	Active bool      `json:"active,omitempty"`
 	Focus  int       `json:"focus,omitempty"`
 	Root   *nodeSpec `json:"root,omitempty"`
@@ -76,10 +80,14 @@ func (t *Plugin) saveWorkspaces() {
 func (t *Plugin) workspaceSpecs() []workspaceSpec {
 	specs := make([]workspaceSpec, 0, len(t.workspaces))
 	for _, w := range t.workspaces {
-		spec := workspaceSpec{Name: w.name, Dir: w.dir, Machine: w.machine, Color: w.color, Active: w.active}
+		spec := workspaceSpec{Task: w.task, Name: w.name, Dir: w.dir, Machine: w.machine, Color: w.color, Active: w.active}
 		for _, tb := range w.tabs {
+			name := tb.name
+			if name == "" && len(tb.root.sessions(nil)) > 1 {
+				name = tabTitle(tb)
+			}
 			spec.Tabs = append(spec.Tabs, tabSpec{
-				Active: tb == w.currentTab(), Focus: t.terminalID(tb.focus),
+				Name: name, Active: tb == w.currentTab(), Focus: t.terminalID(tb.focus),
 				Root: t.saveNode(tb.root),
 			})
 		}
@@ -301,7 +309,7 @@ func (t *Plugin) coreForSpec(spec workspaceSpec) (*core.Client, bool) {
 
 // buildWorkspace makes a live space from a saved one.
 func (t *Plugin) buildWorkspace(spec workspaceSpec, client *core.Client, sameCore bool, color int) *workspace {
-	w := &workspace{id: t.nextID, name: t.uniqueName(spec.Name), dir: spec.Dir,
+	w := &workspace{task: spec.Task, id: t.nextID, name: t.uniqueName(spec.Name), dir: spec.Dir,
 		machine: spec.Machine, client: client, color: spec.Color}
 	t.nextID++
 	if w.color == 0 {
@@ -311,12 +319,15 @@ func (t *Plugin) buildWorkspace(spec workspaceSpec, client *core.Client, sameCor
 		w.dir = homeDir()
 	}
 	for _, ts := range spec.Tabs {
-		tb := &tab{id: t.nextID}
+		tb := &tab{id: t.nextID, name: ts.Name}
 		t.nextID++
 		tb.root = t.restoreNode(ts.Root, spec.Machine, client, sameCore)
 		if tb.root == nil {
 			cols, rows := t.defaultSize()
 			tb.root = leafOf(t.startAt(spec.Machine, client, kindShell, w.dir, cols, rows))
+		}
+		if tb.name == "" && len(tb.root.sessions(nil)) > 1 {
+			tb.name = "Split " + strconv.Itoa(len(w.tabs)+1)
 		}
 		tb.focus = focusFor(tb.root.sessions(nil), ts.Focus)
 		w.tabs = append(w.tabs, tb)

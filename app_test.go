@@ -168,7 +168,7 @@ func (w *window) command(id string) {
 }
 
 // TestWindowShowsWorkspaceAndTabs checks the frame has the workspace on show,
-// the label of its tabs, the sessions the app starts with, and the way to open
+// the terminal list, the sessions the app starts with, and the way to open
 // another tab. The other workspaces and a new one live behind the switcher.
 func TestWindowShowsWorkspaceAndTabs(t *testing.T) {
 	w := startWindow(t)
@@ -177,7 +177,7 @@ func TestWindowShowsWorkspaceAndTabs(t *testing.T) {
 		t.Fatal(err)
 	}
 	texts := w.texts()
-	for _, want := range []string{filepath.Base(wd), "New tab", "TABS"} {
+	for _, want := range []string{filepath.Base(wd), "New terminal", "TERMINALS", "All terminals", "2 panes"} {
 		if !strings.Contains(texts, want) {
 			t.Errorf("the frame does not show %q:\n%s", want, texts)
 		}
@@ -186,6 +186,15 @@ func TestWindowShowsWorkspaceAndTabs(t *testing.T) {
 	// each tab names a session, whatever program actually ran.
 	if got := strings.Count(texts, "Shell"); got == 0 && !strings.Contains(texts, "OpenCode") {
 		t.Errorf("the frame shows no session:\n%s", texts)
+	}
+	// Group labels occur once: the sidebar replaces the horizontal strip.
+	if strings.Count(texts, "Agent terminals") != 1 {
+		t.Fatalf("duplicate or missing split navigation:\n%s", texts)
+	}
+	w.command("terminal.sidebar")
+	texts = w.texts()
+	if strings.Contains(texts, "TERMINALS") || !strings.Contains(texts, "Agent terminals") {
+		t.Fatalf("hiding the sidebar did not restore tab navigation:\n%s", texts)
 	}
 }
 
@@ -2523,5 +2532,168 @@ func TestHoverLinkPreview(t *testing.T) {
 			t.Fatalf("the hover preview never appeared:\n%s", w.texts())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestTaskWorkspaceFlow(t *testing.T) {
+	repo := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v", out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("original\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "initial"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v", out, err)
+		}
+	}
+	w := startWindow(t)
+	w.command("terminal.new-task")
+	if !strings.Contains(w.texts(), "Local repository") {
+		t.Fatal("task dialog did not open")
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "task.new", Args: map[string]any{"name": "Fix login redirect", "folder": repo, "agent": "shell"}}); err != nil {
+		t.Fatal(err)
+	}
+	wait := func(predicate func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for !predicate() {
+			if time.Now().After(deadline) {
+				t.Fatalf("task did not settle:\n%s", w.texts())
+			}
+			w.run()
+			w.tt.Frame()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	var space control.Space
+	wait(func() bool {
+		body, err := w.call(control.Request{Method: "status"})
+		if err != nil {
+			return false
+		}
+		var status control.Status
+		if json.Unmarshal(body, &status) != nil || status.Space == nil || status.Space.Task == nil {
+			return false
+		}
+		space = *status.Space
+		return true
+	})
+	if space.Task.Name != "Fix login redirect" || space.Folder == repo {
+		t.Fatalf("task not isolated: %+v", space)
+	}
+	if !strings.Contains(w.texts(), "Send task") {
+		t.Fatal("task toolbar missing")
+	}
+	if err := os.WriteFile(filepath.Join(space.Folder, "a.txt"), []byte("fixed redirect\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "task.review"}); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool { return strings.Contains(w.texts(), "fixed redirect") })
+	if !strings.Contains(w.texts(), "Checks: Not run") {
+		t.Fatal("check success inferred without a run")
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "task.check", Args: map[string]any{"command": "printf verified"}}); err != nil {
+		t.Fatal(err)
+	}
+	wait(func() bool {
+		return strings.Contains(w.texts(), "Last check: exit 0") && strings.Contains(w.texts(), "verified")
+	})
+	w.close()
+	reopened := startWindowIn(t, "/usr/bin:/bin", w.dir, w.store)
+	body, err := reopened.call(control.Request{Method: "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list control.List
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	taskSpace := 0
+	for _, saved := range list.Spaces {
+		if saved.Task != nil && saved.Task.Dir == space.Folder {
+			taskSpace = saved.ID
+			found = saved.Task.Check != nil && saved.Task.Check.ExitCode == 0
+		}
+	}
+	if !found {
+		t.Fatal("task identity/check was lost on reopen")
+	}
+
+	if _, err := reopened.call(control.Request{Method: "do", Action: "space.select", Args: map[string]any{"id": taskSpace}}); err != nil {
+		t.Fatal(err)
+	}
+	reopened.tt.Frame()
+	if err := reopened.tt.Click("Finish task…"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(reopened.texts(), "Save work & finish") {
+		if time.Now().After(deadline) {
+			t.Fatalf("finish preview did not load: %s", reopened.texts())
+		}
+		reopened.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(space.Folder); err != nil {
+		t.Fatal("preview removed task files")
+	}
+	if err := reopened.tt.Click("Cancel"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(space.Folder); err != nil {
+		t.Fatal("cancel removed task files")
+	}
+	if err := reopened.tt.Click("Finish task…"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for !strings.Contains(reopened.texts(), "Save work & finish") {
+		if time.Now().After(deadline) {
+			t.Fatal("finish preview did not reload")
+		}
+		reopened.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := reopened.tt.Click("Save work & finish"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		reopened.run()
+		reopened.tt.Frame()
+		body, err := reopened.call(control.Request{Method: "ls"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var remaining control.List
+		json.Unmarshal(body, &remaining)
+		present := false
+		for _, s := range remaining.Spaces {
+			if s.ID == taskSpace {
+				present = true
+			}
+		}
+		if !present {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("finish failed: %s", reopened.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(space.Folder); !os.IsNotExist(err) {
+		t.Fatal("finished task folder remains")
+	}
+	saved, err := exec.Command("git", "-C", repo, "show", space.Task.Branch+":a.txt").CombinedOutput()
+	if err != nil || string(saved) != "fixed redirect\n" {
+		t.Fatalf("finished work was not saved: %s %v", saved, err)
 	}
 }

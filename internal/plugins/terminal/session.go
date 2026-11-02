@@ -614,7 +614,7 @@ func (s *session) selectLineAt(y int) {
 // this event goes to it: Shift always selects text here instead.
 func (s *session) mouseReporting(ev ui.InputEvent) (vt.MouseState, bool) {
 	m := s.screen.Mouse()
-	if m.Mode == 0 || ev.Mods&ui.Shift != 0 {
+	if !s.alive || m.Mode == 0 || ev.Mods&ui.Shift != 0 {
 		return m, false
 	}
 	return m, true

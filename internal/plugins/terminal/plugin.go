@@ -17,6 +17,7 @@ import (
 
 	"wada-terminal/internal/config"
 	"wada-terminal/internal/core"
+	"wada-terminal/internal/tasks"
 
 	"github.com/xleotranx/wada-kit/contract/shell"
 	"github.com/xleotranx/wada-kit/kernel"
@@ -28,6 +29,7 @@ import (
 
 // tab is one tab of a workspace: a layout of sessions, one of them focused.
 type tab struct {
+	name  string // stable arrangement name, independent of the focused program
 	id    int
 	root  *node
 	focus *session
@@ -36,20 +38,25 @@ type tab struct {
 // workspace is one folder the window works in: its tabs, the tab on show, and
 // the session with the keyboard.
 type workspace struct {
-	id      int
-	name    string
-	dir     string // where its sessions start
-	machine string // the SSH machine its terminals run on, empty on this computer
-	client  *core.Client
-	color   int // an index into the palette's project colors
-	tabs    []*tab
-	active  int
-	focus   *session
+	finishing bool
+	task      *tasks.Task
+	review    *taskReview
+	id        int
+	name      string
+	dir       string // where its sessions start
+	machine   string // the SSH machine its terminals run on, empty on this computer
+	client    *core.Client
+	color     int // an index into the palette's project colors
+	tabs      []*tab
+	active    int
+	focus     *session
 }
 
 // Plugin is the terminal: its workspaces, their tabs, and the programs their
 // panes run.
 type Plugin struct {
+	finishUI finishTaskUI
+	tasksUI  taskUI
 	ctx      *kernel.Context
 	host     shell.Host
 	services ui.Services
@@ -168,8 +175,8 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 		shell.Page{Title: t.pageTitle, Render: t.page})
 	kernel.Contribute(c, shell.Strip, "terminal.tabs", 0, shell.View{Grow: true,
 		Render: func(c *ui.Context) {
-			if t.hasTabsBlock(t.layoutTree()) {
-				return // the layout places the tab strip itself
+			if t.hasTabsBlock(t.layoutTree()) || t.hasWorkspaceNavigation(t.layoutTree()) {
+				return // sidebar navigation or an explicit tabs block owns switching
 			}
 			t.strip(c)
 		}})
@@ -185,8 +192,11 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 	kernel.Contribute(c, shell.Overlays, "terminal.sessions", 10,
 		shell.View{Render: t.sessions})
 
+	kernel.Contribute(c, shell.Overlays, "terminal.tasks", 15, shell.View{Render: t.taskDialog})
+	kernel.Contribute(c, shell.Overlays, "terminal.finish-task", 20, shell.View{Render: t.finishTaskDialog})
 	t.agentWake = make(chan struct{}, 1)
 	t.ctx.Spawn(func(ctx context.Context) { t.watchAgents(ctx) })
+	t.ctx.Spawn(t.watchTaskChanges)
 	t.ctx.Spawn(func(ctx context.Context) { t.watchForegrounds(ctx) })
 	t.startModAnimation()
 	t.loadConfig()
@@ -287,6 +297,7 @@ type commandSpec struct {
 // error rather than a silent no-op.
 func (t *Plugin) commandSpecs() []commandSpec {
 	specs := []commandSpec{
+		{"new-task", -1, "New Task…", "File", []string{"cmd+shift+t"}, t.openTaskDialog},
 		{"new-workspace", 0, "New Workspace…", "File", []string{"cmd+shift+n"}, t.pickWorkspace},
 		{"close-workspace", 1, "Close Workspace", "File", nil, t.closeCurrentWorkspace},
 		{"next-workspace", 2, "Next Workspace", "File", []string{"cmd+shift+]"}, func() { t.stepWorkspace(1) }},
@@ -398,7 +409,7 @@ func (t *Plugin) seedDemo() {
 	right := t.start(kindCodex, w.dir, 80, 24)
 	root, _ := splitAt(leafOf(left), left, right, false)
 	t.nextID++
-	w.tabs = append(w.tabs, &tab{id: t.nextID, root: root, focus: left})
+	w.tabs = append(w.tabs, &tab{id: t.nextID, name: "Agent terminals", root: root, focus: left})
 	t.nextID++
 	w.selectTab(0)
 	t.workspaces = append(t.workspaces, w)
@@ -500,6 +511,10 @@ func (t *Plugin) openWorkspaceDir(dir string) *workspace {
 
 // closeCurrentWorkspace closes the workspace on show and shows a neighbour.
 func (t *Plugin) closeCurrentWorkspace() {
+	if t.current != nil && t.current.task != nil {
+		t.openFinishTask(t.current)
+		return
+	}
 	if len(t.workspaces) <= 1 {
 		t.host.Toast(ui.Toast{Title: "Keep one workspace",
 			Description: "Open another workspace before closing this one."})
@@ -511,6 +526,15 @@ func (t *Plugin) closeCurrentWorkspace() {
 // closeWorkspace ends every session of a workspace, drops it, and shows the
 // one beside it.
 func (t *Plugin) closeWorkspace(w *workspace) {
+	if w != nil && w.task != nil {
+		t.openFinishTask(w)
+		return
+	}
+	t.dropWorkspace(w)
+}
+
+// dropWorkspace removes UI state only after normal close or successful task cleanup.
+func (t *Plugin) dropWorkspace(w *workspace) {
 	idx := -1
 	for i, other := range t.workspaces {
 		if other == w {
@@ -527,11 +551,12 @@ func (t *Plugin) closeWorkspace(w *workspace) {
 		}
 	}
 	t.workspaces = append(t.workspaces[:idx], t.workspaces[idx+1:]...)
-	if idx < len(t.workspaces) {
-		t.current = t.workspaces[idx]
-	} else {
-		t.current = t.workspaces[len(t.workspaces)-1]
+	if len(t.workspaces) == 0 {
+		t.current = nil
+	} else if w == t.current {
+		t.current = t.workspaces[min(idx, len(t.workspaces)-1)]
 	}
+
 	if t.current != nil && t.current.focus == nil {
 		if tb := t.current.currentTab(); tb != nil {
 			t.current.focus = tb.focus
@@ -634,6 +659,9 @@ func (t *Plugin) splitFocused(vertical bool) {
 	next := t.startAt(w.machine, w.client, kindShell, tb.focus.dir, cols, rows)
 	if root, ok := splitAt(tb.root, tb.focus, next, vertical); ok {
 		tb.root = root
+		if tb.name == "" {
+			tb.name = fmt.Sprintf("Split %d", w.active+1)
+		}
 		tb.focus = next
 		w.focus = next
 		t.saveWorkspaces()
@@ -766,7 +794,7 @@ func (t *Plugin) tabOf(s *session) (*workspace, *tab, int) {
 
 // splitAt splits the pane of s with a new shell beside or below it.
 func (t *Plugin) splitAt(s *session, vertical bool) {
-	w, tb, _ := t.tabOf(s)
+	_, tb, index := t.tabOf(s)
 	if tb == nil {
 		return
 	}
@@ -774,10 +802,12 @@ func (t *Plugin) splitAt(s *session, vertical bool) {
 	next := t.startAt(s.machine, s.client, kindShell, s.dir, cols, rows)
 	if root, ok := splitAt(tb.root, s, next, vertical); ok {
 		tb.root = root
+		if tb.name == "" {
+			tb.name = fmt.Sprintf("Split %d", index+1)
+		}
 		tb.focus = next
 		t.focusOn(next)
 		t.saveWorkspaces()
-		_ = w
 	}
 }
 

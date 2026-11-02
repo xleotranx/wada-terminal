@@ -383,7 +383,12 @@ func (t *Plugin) blockElement(c *ui.Context, ch chrome, block *config.Block, axi
 		return t.sizeBlock(element, block, axis, path)
 
 	case "panes":
-		element := t.content(c, ch)
+		var element ui.Element
+		if t.current != nil && t.current.task != nil {
+			element = t.taskContent(c, ch, t.current)
+		} else {
+			element = t.content(c, ch)
+		}
 		element = t.paintBlock(element, ch, block)
 		if block.Padding > 0 {
 			element = element.Padding(float32(block.Padding))
@@ -672,6 +677,27 @@ func (t *Plugin) hasTitleBlock(block *config.Block) bool {
 	}
 	for i := range block.Children {
 		if t.hasTitleBlock(&block.Children[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasWorkspaceNavigation follows the visible layout, including stack choices.
+// Custom layouts without a workspace column retain the title-strip tabs.
+func (t *Plugin) hasWorkspaceNavigation(block *config.Block) bool {
+	if t.blockHidden(block) {
+		return false
+	}
+	if block.Type == "workspaces" {
+		return true
+	}
+	if block.Type == "stack" {
+		child, ok := t.stackChild(block)
+		return ok && t.hasWorkspaceNavigation(child)
+	}
+	for i := range block.Children {
+		if t.hasWorkspaceNavigation(&block.Children[i]) {
 			return true
 		}
 	}
