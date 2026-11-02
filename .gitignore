@@ -1,0 +1,11 @@
+# build output
+/wada-terminal
+/dist/
+# local module cache used while a sandbox cannot write the shared one
+/.gomodcache/
+/.tmp/
+# a local workspace with a sibling wada-kit checkout, never a release dependency
+/go.work
+/go.work.sum
+# macOS
+.DS_Store

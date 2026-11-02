@@ -1,0 +1,2469 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"image"
+	"image/color"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"wada-terminal/internal/config"
+	"wada-terminal/internal/control"
+	"wada-terminal/internal/core"
+	"wada-terminal/internal/plugins/terminal"
+
+	"github.com/egoist/mygo/ui"
+	"github.com/xleotranx/wada-kit/kernel"
+	"github.com/xleotranx/wada-kit/kernel/kerneltest"
+	"github.com/xleotranx/wada-kit/plugins/inspector"
+	"github.com/xleotranx/wada-kit/plugins/settings"
+	"github.com/xleotranx/wada-kit/shell"
+)
+
+// window is the app running headless: the shell, the queued work workers post,
+// and the tester that builds frames of its view.
+type window struct {
+	t       *testing.T
+	s       *shell.Shell
+	tt      *ui.Tester
+	dir     string
+	store   kernel.Store
+	closed  bool
+	capture bool
+	mu      sync.Mutex
+	q       []func()
+}
+
+// startWindow starts the app the way main composes it, and draws it.
+func startWindow(t *testing.T) *window {
+	t.Helper()
+	// The agents are not part of the test: a minimal PATH makes every seeded
+	// session run a shell, as it does on a machine without them.
+	return startWindowPath(t, "/usr/bin:/bin")
+}
+
+// startWindowPath starts the app with PATH, so a test can put a program where
+// an agent would be.
+func startWindowPath(t *testing.T, path string) *window {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wada-window-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return startWindowIn(t, path, dir, kerneltest.NewStore())
+}
+
+// startWindowIn starts a window on a chosen data folder and store, which lets
+// a test close one window and open another on the core it left running.
+func startWindowIn(t *testing.T, path, dir string, store kernel.Store) *window {
+	t.Helper()
+	t.Setenv("PATH", path)
+	t.Setenv(config.EnvDir, filepath.Join(dir, "config"))
+	w := &window{t: t, dir: dir, store: store}
+	post := func(fn func()) {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.q = append(w.q, fn)
+	}
+	opts := shell.Options{Name: app.Name, Menus: app.Menus, Post: post, Strict: true, Store: store, DataDir: dir}
+	w.capture = injectCapture(&opts, func() ([]byte, error) { return []byte("\x89PNG\r\n\x1a\nfake"), nil })
+	s, err := shell.New(opts, terminal.New, inspector.New, settings.New)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.s = s
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w.close)
+	w.tt = ui.NewTester(s.View, 1100, 760)
+	w.settle()
+	return w
+}
+
+// injectCapture gives the shell a fake capture function when the installed
+// wada-kit has the optional field, and reports whether it did. Reflection keeps
+// this test compiling against a kit from before the capture hook.
+func injectCapture(opts *shell.Options, fn func() ([]byte, error)) bool {
+	field := reflect.ValueOf(opts).Elem().FieldByName("Capture")
+	if !field.IsValid() || !field.CanSet() || field.Type() != reflect.TypeOf(fn) {
+		return false
+	}
+	field.Set(reflect.ValueOf(fn))
+	return true
+}
+
+// close ends the window, leaving the core's terminals running as a person
+// quitting the app would.
+func (w *window) close() {
+	if w.closed {
+		return
+	}
+	w.closed = true
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := w.s.Close(ctx); err != nil {
+		w.t.Error(err)
+	}
+}
+
+// run lands what workers posted. It lets go of the queue's lock while a
+// closure runs: a closure can post again, as a command change does.
+func (w *window) run() {
+	for {
+		w.mu.Lock()
+		if len(w.q) == 0 {
+			w.mu.Unlock()
+			return
+		}
+		fn := w.q[0]
+		w.q = w.q[1:]
+		w.mu.Unlock()
+		fn()
+	}
+}
+
+// settle lets the sessions start, then draws.
+func (w *window) settle() {
+	w.t.Helper()
+	for range 30 {
+		w.run()
+		time.Sleep(2 * time.Millisecond)
+		w.tt.Frame()
+	}
+}
+
+// texts is what the frame shows, as text.
+func (w *window) texts() string {
+	w.tt.Frame()
+	return strings.Join(w.tt.Texts(), "\n")
+}
+
+// command runs a command the way the menu bar does.
+func (w *window) command(id string) {
+	w.t.Helper()
+	for _, e := range kernel.Items(w.s.Kernel, kernel.Commands) {
+		if e.ID == id {
+			kernel.Invoke(w.s.Kernel, e, func(c kernel.Command) {
+				if c.Run != nil {
+					c.Run()
+				}
+			})
+			w.settle()
+			return
+		}
+	}
+	w.t.Fatalf("no command %q", id)
+}
+
+// TestWindowShowsWorkspaceAndTabs checks the frame has the workspace, the
+// sessions the app starts with and the way to open another.
+func TestWindowShowsWorkspaceAndTabs(t *testing.T) {
+	w := startWindow(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	texts := w.texts()
+	for _, want := range []string{filepath.Base(wd), "New tab", "New workspace"} {
+		if !strings.Contains(texts, want) {
+			t.Errorf("the frame does not show %q:\n%s", want, texts)
+		}
+	}
+	// The app starts with a session in a tab and a split of two in another;
+	// each tab names a session, whatever program actually ran.
+	if got := strings.Count(texts, "Shell"); got == 0 && !strings.Contains(texts, "OpenCode") {
+		t.Errorf("the frame shows no session:\n%s", texts)
+	}
+}
+
+// TestCommands checks that opening a tab and closing a pane leave a frame that
+// still draws, as the menu bar's commands do.
+func TestCommands(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	if texts := w.texts(); !strings.Contains(texts, "wada-terminal") {
+		t.Fatalf("after a new tab the frame lost the workspace:\n%s", texts)
+	}
+	w.command("terminal.split-right")
+	w.command("terminal.close-pane")
+	w.command("terminal.tab-2")
+	w.command("terminal.sidebar")
+	w.texts()
+}
+
+// hasPTY reports whether this machine lets a test open a pseudo-terminal.
+func hasPTY() bool {
+	f, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
+}
+
+// keyFor is the key that types r on a US keyboard.
+func keyFor(r rune) ui.Key {
+	switch {
+	case r >= 'a' && r <= 'z':
+		return ui.KeyA + ui.Key(r-'a')
+	case r >= '0' && r <= '9':
+		return ui.Key0 + ui.Key(r-'0')
+	case r == ' ':
+		return ui.KeySpace
+	case r == '-':
+		return ui.KeyMinus
+	}
+	return ui.KeyUnknown
+}
+
+// TestTypingReachesTheShell types a command at a pane and reads its output
+// from the frame: the key encoding, the pseudo-terminal, the screen emulator
+// and the painter all take part.
+func TestTypingReachesTheShell(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab") // a shell, focused
+	for _, r := range "echo zq7x" {
+		w.tt.TypeKey(0, keyFor(r), string(r))
+	}
+	w.tt.Key(0, ui.KeyEnter)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+		if strings.Count(w.texts(), "zq7x") >= 2 {
+			return
+		}
+	}
+	t.Fatalf("the shell never printed what was typed:\n%s", w.texts())
+}
+
+// typeLine types text and Return at the focused pane.
+func (w *window) typeLine(text string) {
+	for _, r := range text {
+		w.tt.TypeKey(0, keyFor(r), string(r))
+	}
+	w.tt.Key(0, ui.KeyEnter)
+}
+
+// TestScrollbackScrollsTheScreen checks that the wheel reads back through what
+// a session printed, and that the header says how far back the view is.
+func TestScrollbackScrollsTheScreen(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine("seq 1 120")
+	deadline := time.Now().Add(20 * time.Second)
+	for !hasLine(w.texts(), "120") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The pointer sits over the pane's cells; the wheel goes up, into the
+	// history.
+	w.tt.Wheel(600, 400, 0, -60)
+	if texts := w.texts(); !strings.Contains(texts, "↑") {
+		t.Fatalf("the frame does not show the view is above the bottom:\n%s", texts)
+	}
+}
+
+// hasLine reports whether the frame has want as a line of its own, trimmed.
+func hasLine(texts, want string) bool {
+	for _, line := range strings.Split(texts, "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTheTerminalAnswersQueries asks the pane's terminal for its background
+// color the way a program does, and reads the answer back from the frame: the
+// query reaches the screen emulator, the reply goes to the program through the
+// pseudo-terminal.
+func TestTheTerminalAnswersQueries(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	// The inner shell is not interactive, so nothing between it and the
+	// terminal reads the reply: dd takes the 25 bytes of OSC 11.
+	w.typeLine(`zsh -c 'printf "\033]11;?\007"; dd bs=1 count=25 2>/dev/null | cat -v'`)
+	// The reply reports the surface the pane paints on: the dark one in a
+	// dark window, the light one in a light window, as this tester builds it.
+	want := []string{"rgb:0b0b/0b0b/0d0d", "rgb:fbfb/fbfb/fcfc"}
+	deadline := time.Now().Add(20 * time.Second)
+	for !containsAny(w.texts(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the terminal did not answer the color query:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// containsAny reports whether texts holds one of wants.
+func containsAny(texts string, wants []string) bool {
+	for _, want := range wants {
+		if strings.Contains(texts, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSelectionCopiesThroughTheMenu drags over a line of a pane and runs the
+// copy command, as the Edit menu's Copy does: the cells under the drag come
+// back as text on the clipboard.
+func TestSelectionCopiesThroughTheMenu(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab") // a shell, focused
+	w.typeLine("echo hello-copy")
+	deadline := time.Now().Add(20 * time.Second)
+	for !hasLine(w.texts(), "hello-copy") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never printed the line:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+	}
+	rect, ok := w.tt.Find("hello-copy")
+	if !ok {
+		t.Fatalf("the frame has no line to select:\n%s", w.texts())
+	}
+	y := rect.Y + rect.H/2
+	w.tt.Press(rect.X+1, y)
+	w.tt.Move(rect.X+rect.W-2, y)
+	w.tt.Release(rect.X+rect.W-2, y)
+	w.command("terminal.copy")
+	if got := w.tt.Clipboard(); !strings.Contains(got, "hello-copy") {
+		t.Fatalf("the clipboard holds %q, not the selected line", got)
+	}
+}
+
+// dividerAt finds the one-pixel line a split draws between its panes: the
+// only column that differs from both its neighbours, down the whole pane.
+func dividerAt(img *image.RGBA, ys []int) (int, bool) {
+	b := img.Bounds()
+	for x := b.Min.X + 320; x < b.Max.X-2; x++ {
+		found := true
+		for _, y := range ys {
+			c := img.RGBAAt(x, y)
+			if c == img.RGBAAt(x-1, y) || c == img.RGBAAt(x+1, y) || img.RGBAAt(x-1, y) != img.RGBAAt(x+1, y) {
+				found = false
+				break
+			}
+		}
+		if found {
+			return x, true
+		}
+	}
+	return 0, false
+}
+
+// TestDraggingASplitDivider drags the bar between two panes and checks that it
+// moved: the divider is hit-testable, holds the pointer, and redraws the split.
+func TestDraggingASplitDivider(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.split-right")
+	w.tt.Frame()
+	ys := []int{140, 260, 380, 500}
+	before, ok := dividerAt(w.tt.Image(), ys)
+	if !ok {
+		t.Fatal("the split draws no divider")
+	}
+	w.tt.Press(float32(before), 300)
+	w.tt.Move(float32(before+120), 300)
+	w.tt.Release(float32(before+120), 300)
+	w.texts()
+	after, ok := dividerAt(w.tt.Image(), ys)
+	if !ok {
+		t.Fatal("the divider vanished after the drag")
+	}
+	if after < before+80 {
+		t.Fatalf("the divider moved from %d to %d, not with the pointer", before, after)
+	}
+}
+
+// TestMouseReportingReachesTheProgram turns mouse tracking on from the shell,
+// then clicks a pane: what the program reads back is the report the terminal
+// sent, shown by cat -v.
+func TestMouseReportingReachesTheProgram(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine(`printf '\033[?1000h\033[?1006h'; cat -v`)
+	// Let the shell start the program before the click, then click until it
+	// answers: the report is written to the program, which prints it.
+	deadline := time.Now().Add(20 * time.Second)
+	for !strings.Contains(w.texts(), "[<") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the program never saw a mouse report:\n%s", w.texts())
+		}
+		w.tt.ClickAt(600, 400)
+		w.run()
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// TestHyperlinkClickOpens prints a link with OSC 8 and clicks its text: the
+// cell under the pointer knows its URL, and the click asks the window to open
+// it.
+func TestHyperlinkClickOpens(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine(`printf '\033]8;;https://example.com\033\\click me\033]8;;\033\\\n'`)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		w.tt.Frame()
+		if rect, ok := w.tt.Find("click me"); ok {
+			// The row's box is as wide as the pane; the link is its first
+			// cells.
+			w.tt.ClickAt(rect.X+10, rect.Y+rect.H/2)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the link never showed:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if urls := w.tt.OpenedURLs(); len(urls) == 0 || urls[0] != "https://example.com" {
+		t.Fatalf("opened %q, want the link's URL", urls)
+	}
+}
+
+// TestResizeReflowsTheLine types a line longer than the pane and narrows the
+// window: the line wraps again, and no character is lost.
+func TestResizeReflowsTheLine(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine(`printf 'z%.0s' {1..120}; printf '\n'`)
+	deadline := time.Now().Add(20 * time.Second)
+	for strings.Count(w.texts(), "z") < 121 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the line never showed:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+	}
+	before := strings.Count(w.texts(), "z")
+	w.tt.SetSize(900, 760)
+	for range 6 {
+		w.run()
+		w.tt.Frame()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if after := strings.Count(w.texts(), "z"); after != before {
+		t.Fatalf("the line held %d characters before the resize and %d after", before, after)
+	}
+}
+
+// TestSessionsIndexesEverySession opens the index with its shortcut and
+// finds the sessions the window holds, then gives the keyboard back.
+func TestSessionsIndexesEverySession(t *testing.T) {
+	w := startWindow(t)
+	// The shortcut belongs to the View menu, which a headless window has no
+	// menu bar to press; the command is what the menu runs.
+	w.command("terminal.index")
+	texts := w.texts()
+	for _, want := range []string{"Sessions", "Every session in this window", "move", "open", "close", "sessions"} {
+		if !strings.Contains(texts, want) {
+			t.Fatalf("the index does not show %q:\n%s", want, texts)
+		}
+	}
+	if strings.Contains(texts, "No sessions open") {
+		t.Fatalf("the index is empty although the window has sessions:\n%s", texts)
+	}
+
+	// Return opens the chosen row and closes the index.
+	w.tt.Key(0, ui.KeyDown)
+	w.tt.Key(0, ui.KeyEnter)
+	if texts := w.texts(); strings.Contains(texts, "Every session in this window") {
+		t.Fatalf("the index stayed open after Return:\n%s", texts)
+	}
+
+	// Escape closes it too.
+	w.command("terminal.index")
+	if texts := w.texts(); !strings.Contains(texts, "Every session in this window") {
+		t.Fatalf("the command did not open the index:\n%s", texts)
+	}
+	w.tt.Key(0, ui.KeyEscape)
+	if texts := w.texts(); strings.Contains(texts, "Every session in this window") {
+		t.Fatalf("the index stayed open after Escape:\n%s", texts)
+	}
+}
+
+// TestSessionsFindsABlockedAgent puts a program where Claude Code would be,
+// has it draw an approval, and waits for the quiet watcher: the pane says the
+// agent needs input, and the index opens on it.
+func TestSessionsFindsABlockedAgent(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\nprintf 'Do you want to proceed?\\n\\n\\342\\235\\257 1. Yes\\n  2. No\\n'\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowPath(t, dir+":/usr/bin:/bin")
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(w.texts(), "Needs input") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the approval never reached the pane's state:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	w.command("terminal.index")
+	texts := w.texts()
+	if !strings.Contains(texts, "Needs input") {
+		t.Fatalf("the index does not show the blocked agent:\n%s", texts)
+	}
+	// The blocked agent is the row the index chose: Return opens it and closes
+	// the index.
+	w.tt.Key(0, ui.KeyEnter)
+	if texts := w.texts(); strings.Contains(texts, "Every session in this window") {
+		t.Fatalf("the index stayed open after opening the blocked agent:\n%s", texts)
+	}
+}
+
+// TestSessionsFollowsOSC7501 puts a program where Claude Code would be,
+// has it speak the Program Status Protocol instead of drawing an approval, and
+// checks that the pane and the index show what it said.
+func TestSessionsFollowsOSC7501(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	body := "#!/bin/sh\n" +
+		`printf '\033]7501;state=blocked:kind=permission:app=claude-code:title=Rml4IGxvZ2lu:msg=QWxsb3cgdGhlIGVkaXQ/\033\\'` + "\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowPath(t, dir+":/usr/bin:/bin")
+	w.command("terminal.index")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Needs approval") &&
+			strings.Contains(texts, "Fix login") && strings.Contains(texts, "Allow the edit?") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the 7501 report never reached the index:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	// The blocked agent is the row the index chose: Return opens its pane.
+	w.tt.Key(0, ui.KeyEnter)
+	texts := w.texts()
+	if strings.Contains(texts, "Every session in this window") {
+		t.Fatalf("the index stayed open after opening the reporting agent:\n%s", texts)
+	}
+	if !strings.Contains(texts, "Fix login") || !strings.Contains(texts, "Allow the edit?") {
+		t.Fatalf("the pane does not show the protocol's title and message:\n%s", texts)
+	}
+}
+
+// TestCoreKeepsTerminalsWhenTheWindowCloses starts a window on a core, closes
+// it the way a person quitting does, and opens another window on the same
+// data folder and saved layout: the core's terminals are still there and the
+// second window attaches to them instead of starting new ones.
+func TestCoreKeepsTerminalsWhenTheWindowCloses(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	dir, err := os.MkdirTemp("", "wada-core-window-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	server, err := core.Listen(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { server.Close() })
+	client, err := core.Connect(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := kerneltest.NewStore()
+	w1 := startWindowIn(t, "/usr/bin:/bin", dir, store)
+	before, err := client.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Terminals) == 0 || !before.Terminals[0].Alive {
+		t.Fatalf("the first window started no core terminals: %+v", before.Terminals)
+	}
+	ids := map[int]bool{}
+	for _, rec := range before.Terminals {
+		ids[rec.ID] = true
+	}
+	w1.close()
+
+	afterClose, err := client.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterClose.Terminals) != len(before.Terminals) {
+		t.Fatalf("closing the window started or ended terminals: before %d, after %d", len(before.Terminals), len(afterClose.Terminals))
+	}
+	for _, rec := range afterClose.Terminals {
+		if !rec.Alive || !ids[rec.ID] {
+			t.Fatalf("a terminal did not survive the window: %+v", rec)
+		}
+	}
+
+	w2 := startWindowIn(t, "/usr/bin:/bin", dir, store)
+	afterReopen, err := client.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterReopen.Terminals) != len(before.Terminals) {
+		t.Fatalf("the reopened window started new terminals instead of attaching: before %d, after %d", len(before.Terminals), len(afterReopen.Terminals))
+	}
+	for _, rec := range afterReopen.Terminals {
+		if !ids[rec.ID] || !rec.Alive {
+			t.Fatalf("the reopened window lost a terminal: %+v", rec)
+		}
+	}
+	if texts := w2.texts(); !strings.Contains(texts, "Shell") {
+		t.Fatalf("the reopened window does not show its terminals:\n%s", texts)
+	}
+}
+
+// TestCursorPaintsOverTheGlyph puts the cursor on a letter and checks that its
+// bar is on top: a caret painted under the glyph disappears in an agent's input
+// field, where the program leaves the cursor on the placeholder's first letter.
+func TestCursorPaintsOverTheGlyph(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.tt.SetDark(true)
+	w.command("terminal.new-tab")
+	w.typeLine(`printf '\033[2J\033[HMZ\033[2D'; sleep 30`)
+	deadline := time.Now().Add(20 * time.Second)
+	for !hasLine(w.texts(), "MZ") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never cleared its screen:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+	}
+	rect, ok := w.tt.Find("MZ")
+	if !ok || rect.W < 2 {
+		t.Fatalf("the frame has no MZ to put the cursor on:\n%s", w.texts())
+	}
+	img := w.tt.Image()
+	cursor := color.RGBA{R: 0xe9, G: 0xe9, B: 0xef, A: 0xff}
+	y0, y1 := int(rect.Y+rect.H*0.3), int(rect.Y+rect.H*0.7)
+	for dx := 0; dx < 2; dx++ {
+		x := int(rect.X) + dx
+		run := 0
+		for y := y0; y <= y1; y++ {
+			if img.RGBAAt(x, y) == cursor {
+				run++
+			}
+		}
+		if run >= y1-y0-1 {
+			return
+		}
+	}
+	t.Fatalf("the cursor bar is not painted over the letter at %v", rect)
+}
+
+// TestReverseSpacePaintsItsBackground leaves a run of reversed spaces, which
+// is how Pi draws its own cursor, and checks the block is painted: a run of
+// blanks at the end of a line otherwise loses its background in the text
+// layout.
+func TestReverseSpacePaintsItsBackground(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.tt.SetDark(true)
+	w.command("terminal.new-tab")
+	w.typeLine(`printf '\033[2J\033[H\033[7m  \033[0m\nZ'; sleep 30`)
+	deadline := time.Now().Add(20 * time.Second)
+	for !hasLine(w.texts(), "Z") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never drew the reversed run:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The reversed run is alone on the first row, the Z marks the second;
+	// the run is trailing whitespace, which the text layout drops.
+	rect, ok := w.tt.Find("Z")
+	if !ok {
+		t.Fatalf("the frame has no Z under the reversed run:\n%s", w.texts())
+	}
+	img := w.tt.Image()
+	light := color.RGBA{R: 0xcf, G: 0xcf, B: 0xd6, A: 0xff}
+	y := int(rect.Y - rect.H*0.5)
+	run := 0
+	for x := int(rect.X); x < int(rect.X)+24 && x < img.Bounds().Max.X; x++ {
+		if img.RGBAAt(x, y) != light {
+			break
+		}
+		run++
+	}
+	if run < 12 {
+		t.Fatalf("the reversed run paints %d light pixels, want its two cells", run)
+	}
+}
+
+// call sends one control request to the window and runs the posted work it
+// waits on, the way the app's event loop would.
+func (w *window) call(req control.Request) (json.RawMessage, error) {
+	type answer struct {
+		result json.RawMessage
+		err    error
+	}
+	ch := make(chan answer, 1)
+	go func() {
+		result, err := control.Call(control.SocketPath(w.dir), req)
+		ch <- answer{result, err}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case got := <-ch:
+			return got.result, got.err
+		default:
+			w.run()
+			if time.Now().After(deadline) {
+				return nil, errors.New("the control request did not finish")
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+}
+
+// TestControlSocketDrivesTheWindow checks the agent-facing API: the window
+// answers ls and status, makes a tab, and refuses an action it does not know.
+func TestControlSocketDrivesTheWindow(t *testing.T) {
+	w := startWindow(t)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := w.call(control.Request{Method: "status"}); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			files, _ := filepath.Glob(filepath.Join(w.dir, "*"))
+			t.Fatalf("the window never opened its control socket; dir %q holds %v; frame:\n%s", w.dir, files, w.texts())
+		}
+	}
+
+	raw, err := w.call(control.Request{Method: "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list control.List
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Spaces) < 2 || len(list.Spaces[0].Tabs) == 0 || len(list.Spaces[0].Tabs[0].Panes) == 0 {
+		t.Fatalf("ls does not describe the seeded window: %s", raw)
+	}
+	if got := list.Spaces[0].Tabs[0].Panes[0].State; got == "" {
+		t.Fatalf("a pane has no state: %s", raw)
+	}
+
+	raw, err = w.call(control.Request{Method: "do", Action: "tab.new", Args: map[string]any{"kind": "shell"}})
+	if err != nil {
+		t.Fatalf("tab.new: %v", err)
+	}
+	var made struct {
+		Pane int `json:"pane"`
+		Tab  int `json:"tab"`
+	}
+	if err := json.Unmarshal(raw, &made); err != nil || made.Pane == 0 {
+		t.Fatalf("tab.new returned %s (%v)", raw, err)
+	}
+	raw, _ = w.call(control.Request{Method: "ls"})
+	var after control.List
+	if err := json.Unmarshal(raw, &after); err != nil {
+		t.Fatal(err)
+	}
+	if n := countPanes(after); n <= countPanes(list) {
+		t.Fatalf("tab.new did not add a session: before %d, after %d", countPanes(list), n)
+	}
+
+	if w.capture {
+		raw, err = w.call(control.Request{Method: "shot"})
+		if err != nil {
+			t.Fatalf("shot: %v", err)
+		}
+		var shot struct {
+			PNG string `json:"png"`
+		}
+		if err := json.Unmarshal(raw, &shot); err != nil || shot.PNG == "" {
+			t.Fatalf("shot returned %s (%v)", raw, err)
+		}
+		if png, err := base64.StdEncoding.DecodeString(shot.PNG); err != nil || !bytes.HasPrefix(png, []byte("\x89PNG")) {
+			t.Fatalf("shot PNG = %q (%v)", png, err)
+		}
+	}
+
+	if _, err := w.call(control.Request{Method: "do", Action: "pane.explode"}); err == nil {
+		t.Fatal("an unknown action was accepted")
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "pane.focus"}); err == nil {
+		t.Fatal("a required argument was not enforced")
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "space.new", Args: map[string]any{"nope": "x"}}); err == nil {
+		t.Fatal("an unknown argument was not refused")
+	}
+}
+
+// countPanes counts the sessions in a list answer.
+func countPanes(list control.List) int {
+	n := 0
+	for _, space := range list.Spaces {
+		for _, tab := range space.Tabs {
+			n += len(tab.Panes)
+		}
+	}
+	return n
+}
+
+// TestInterfaceFilesReload checks the third herdr-app idea end to end: the
+// window writes the files and the guide, notices a save, applies a good one,
+// and keeps the last good version when a file is broken.
+func TestInterfaceFilesReload(t *testing.T) {
+	w := startWindow(t)
+	dir := filepath.Join(w.dir, "config")
+	for _, name := range []string{"AGENTS.md", "settings.json", "keys.json", "layouts/main.json", "themes/atom-one-dark.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("the window did not write %s: %v", name, err)
+		}
+	}
+	wait := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			w.run()
+			frame := w.texts()
+			if cond() {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s:\n%s", what, frame)
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+	}
+
+	// A broken settings file is reported and changes nothing.
+	settings := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settings, []byte(`{"font_size": 99}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wait("the settings error", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "settings.error"))
+		return err == nil
+	})
+	if texts := w.texts(); !strings.Contains(texts, "did not load") {
+		t.Fatalf("no toast for the broken settings:\n%s", texts)
+	}
+
+	// A good settings file selects a theme and a layout, and its error goes.
+	if err := os.WriteFile(settings, []byte(`{"font_size": 14, "theme": "atom-one-dark", "layout": "main", "appearance": "dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "layouts/main.json"), []byte(`{"sidebar": {"side": "right", "width": 300}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wait("the settings to load", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "settings.error"))
+		return os.IsNotExist(err)
+	})
+	w.texts()
+
+	// keys.json: an unknown command is an error, then a valid file clears it.
+	keys := filepath.Join(dir, "keys.json")
+	if err := os.WriteFile(keys, []byte(`{"explode": "cmd+e"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wait("the keys error", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "keys.error"))
+		return err == nil
+	})
+	if err := os.WriteFile(keys, []byte(`{"new-tab": "ctrl+shift+t", "index": ["cmd+shift+i"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wait("the keys to load", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "keys.error"))
+		return os.IsNotExist(err)
+	})
+	w.texts()
+}
+
+// TestLayoutTreePlacesAgentsBesidePanes checks the composable layout format
+// end to end: a root row with workspaces, panes and the permanent agents list.
+func TestLayoutTreePlacesAgentsBesidePanes(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	bin := t.TempDir()
+	body := "#!/bin/sh\nprintf '\\033]7501;state=blocked:kind=permission:app=claude-code:title=Rml4IGxvZ2lu:msg=QWxsb3cgdGhlIGVkaXQ/\\033\\\\'\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowPath(t, bin+":/usr/bin:/bin")
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {
+	    "type": "row",
+	    "gap": 4,
+	    "children": [
+	      {"type": "workspaces", "size": {"px": 220}},
+	      {"type": "panes", "size": {"weight": 1}},
+	      {"type": "agents", "size": {"px": 260}}
+	    ]
+	  }
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Agents") && strings.Contains(texts, "Fix login") && strings.Contains(texts, "Needs approval") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the agents layout never drew:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	// A broken layout keeps the working one and reports beside it.
+	if err := os.WriteFile(layout, []byte(`{"root": {"type": "row", "children": [{"type": "wat"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(w.dir, "config", "layout.error")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a broken layout did not write layout.error")
+		}
+		w.run()
+		time.Sleep(30 * time.Millisecond)
+	}
+	if texts := w.texts(); !strings.Contains(texts, "Agents") {
+		t.Fatalf("a broken layout dropped the working one:\n%s", texts)
+	}
+}
+
+// TestModPanelRendersAndClicks checks the mod runtime end to end: a layout's
+// hello block draws, its button calls the script, and the state is saved.
+func TestModPanelRendersAndClicks(t *testing.T) {
+	w := startWindow(t)
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "mod", "mod": "hello", "size": {"px": 280}}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Hello from a mod") && strings.Contains(texts, "Clicks: 0") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the hello mod did not draw:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := w.tt.Click("Clicks: 0"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Clicks: 1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the mod click did not redraw:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	state, err := os.ReadFile(filepath.Join(w.dir, "config", "mods", "hello", "state.json"))
+	if err != nil || !strings.Contains(string(state), `"count": 1`) {
+		t.Fatalf("state = %s (%v)", state, err)
+	}
+}
+
+// TestMachineWorkspace checks a space whose panes run on another machine: the
+// machine is connected through the ssh command, the remote core starts, and
+// the window's list carries the machine's name.
+func TestMachineWorkspace(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	root := t.TempDir()
+	appBin := filepath.Join(root, "wada-terminal")
+	build := exec.Command("go", "build", "-o", appBin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the remote wada-terminal: %v\n%s", err, out)
+	}
+	sshDir := filepath.Join(root, "ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+host=$1; shift
+export WADATERM_DATA_DIR="${FAKE_REMOTE_DATA:?}"
+exec sh -c "$*"
+`
+	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	remoteDir := filepath.Join(root, "remote")
+	t.Setenv("FAKE_REMOTE_DATA", remoteDir)
+	w := startWindowPath(t, sshDir+":"+root+":/usr/bin:/bin")
+	if err := os.MkdirAll(filepath.Join(w.dir, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.dir, "config", "machines.json"),
+		[]byte(`{"box": {"ssh": "box", "bin": "wada-terminal"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if body, err := os.ReadFile(filepath.Join(remoteDir, "core.json")); err == nil {
+			var instance struct {
+				PID int `json:"pid"`
+			}
+			if json.Unmarshal(body, &instance) == nil && instance.PID > 0 {
+				if proc, err := os.FindProcess(instance.PID); err == nil {
+					_ = proc.Kill()
+				}
+			}
+		}
+	})
+
+	result, err := w.call(control.Request{Method: "do", Action: "space.new",
+		Args: map[string]any{"machine": "box", "name": "remote"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var made map[string]any
+	if err := json.Unmarshal(result, &made); err != nil || made["machine"] != "box" {
+		t.Fatalf("space.new = %s, %v", result, err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "remote") && strings.Contains(texts, "box") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the machine workspace did not draw:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	listResult, err := w.call(control.Request{Method: "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list control.List
+	if err := json.Unmarshal(listResult, &list); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, space := range list.Spaces {
+		if space.Machine != "box" || space.Name != "remote" {
+			continue
+		}
+		found = true
+		for _, tab := range space.Tabs {
+			for _, pane := range tab.Panes {
+				if pane.Machine != "box" {
+					t.Fatalf("pane = %+v", pane)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no remote space in %+v", list)
+	}
+	// A new tab in that space starts on the same machine, not this computer.
+	if _, err := w.call(control.Request{Method: "do", Action: "tab.new",
+		Args: map[string]any{"kind": "shell"}}); err != nil {
+		t.Fatal(err)
+	}
+	listResult, err = w.call(control.Request{Method: "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list = control.List{}
+	if err := json.Unmarshal(listResult, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, space := range list.Spaces {
+		if space.Machine != "box" {
+			continue
+		}
+		for _, tab := range space.Tabs {
+			for _, pane := range tab.Panes {
+				if pane.Machine != "box" {
+					t.Fatalf("a tab on the machine made a local pane: %+v", pane)
+				}
+			}
+		}
+	}
+	before := remoteTerminalCount(t, remoteDir)
+	w.close()
+	// A second window on the same store and data folder reattaches to the
+	// machine's terminals instead of starting new ones.
+	w = startWindowIn(t, sshDir+":"+root+":/usr/bin:/bin", w.dir, w.store)
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "remote") && strings.Contains(texts, "box") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the machine workspace did not come back:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	after := remoteTerminalCount(t, remoteDir)
+	if after != before {
+		t.Fatalf("the machine had %d terminals before the window closed and %d after; it started new ones instead of attaching", before, after)
+	}
+}
+
+// remoteTerminalCount reads a core directly. The fake SSH put the remote core
+// on this computer's disk, so a test can count what it holds.
+func remoteTerminalCount(t *testing.T, dir string) int {
+	t.Helper()
+	client, err := core.Connect(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := client.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(list.Terminals)
+}
+
+// TestLayoutStackSwitches checks a stack shows one child and the control
+// action changes it and reports the choice in status.
+func TestLayoutStackSwitches(t *testing.T) {
+	w := startWindow(t)
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "stack", "id": "side", "active": "hello", "size": {"px": 280},
+	     "children": [
+	       {"type": "agents", "id": "agents"},
+	       {"type": "mod", "id": "hello", "mod": "hello"}
+	     ]}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if strings.Contains(w.texts(), "Hello from a mod") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stack did not draw its active child:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "layout.stack",
+		Args: map[string]any{"stack": "side", "active": "agents"}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Agents") && !strings.Contains(texts, "Hello from a mod") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stack did not switch to agents:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Stacks["side"] != "agents" {
+		t.Fatalf("status stacks = %+v", current.Stacks)
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "layout.stack.next",
+		Args: map[string]any{"stack": "side"}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		if strings.Contains(w.texts(), "Hello from a mod") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the stack did not cycle back:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestFloatingModDrawsOverThePage checks a float's mod draws in a frame on the
+// right of the window, outside the normal flow.
+func TestFloatingModDrawsOverThePage(t *testing.T) {
+	w := startWindow(t)
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "float", "id": "hello", "mod": "hello", "edge": "right",
+	     "align": "center", "width": 300, "height": 240}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Hello from a mod") {
+			rect, ok := w.tt.Find("Hello from a mod")
+			if !ok {
+				t.Fatalf("the floating text has no place")
+			}
+			if rect.X < 700 {
+				t.Fatalf("the float is not on the right: %+v", rect)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the floating mod did not draw:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestModInput checks a native input in a mod: typing updates api.inputs and
+// Enter calls the mod with the value.
+func TestModInput(t *testing.T) {
+	w := startWindow(t)
+	folder := filepath.Join(w.dir, "config", "mods", "form")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := `function render(api) {
+  return {type: "column", padding: 10, gap: 6, children: [
+    {type: "text", text: "Value: " + (api.inputs.name || "")},
+    {type: "text", text: "Last: " + (api.state.last || "none"), color: "muted", font_size: 10},
+    {type: "input", id: "name", value: "", placeholder: "Type name", on_submit: true, autofocus: true}
+  ]};
+}
+function click(id, api) {
+  if (id === "name") { api.state.last = api.inputs.name; }
+}
+`
+	if err := os.WriteFile(filepath.Join(folder, "main.js"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "mod", "mod": "form", "size": {"px": 340}}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Value: ") && strings.Contains(texts, "Last: none") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the form mod did not draw:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	w.tt.Type("src/x.go")
+	w.tt.Key(0, ui.KeyEnter)
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Value: src/x.go") && strings.Contains(texts, "Last: src/x.go") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the input never reached the mod:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestAnimatedModRedraws checks api.animate makes a mod draw again without
+// another input event.
+func TestAnimatedModRedraws(t *testing.T) {
+	w := startWindow(t)
+	folder := filepath.Join(w.dir, "config", "mods", "pulse")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := `function render(api) {
+  api.animate(30);
+  return {type: "text", text: "Tick " + Math.floor(api.now / 30), translate_x: 2};
+}
+`
+	if err := os.WriteFile(filepath.Join(folder, "main.js"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "mod", "mod": "pulse", "size": {"px": 260}}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := ""
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		w.tt.Frame()
+		for _, text := range w.tt.Texts() {
+			if strings.HasPrefix(text, "Tick ") {
+				first = text
+				break
+			}
+		}
+		if first != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the animated mod did not draw:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		w.tt.Frame()
+		for _, text := range w.tt.Texts() {
+			if strings.HasPrefix(text, "Tick ") && text != first {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the animated mod stayed at %q", first)
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestFloatingModDrags checks a float follows the pointer, saves its offset,
+// and goes back to the layout anchor with layout.float.reset.
+func TestFloatingModDrags(t *testing.T) {
+	w := startWindow(t)
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "float", "id": "hello", "mod": "hello", "edge": "right",
+	     "align": "center", "width": 300, "height": 240}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var start ui.Rect
+	for {
+		w.tt.Frame()
+		if rect, ok := w.tt.Find("Hello from a mod"); ok {
+			start = rect
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the float did not draw:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	x, y := start.X+20, start.Y+8
+	w.tt.Move(x, y)
+	w.tt.Press(x, y)
+	for i := 1; i <= 8; i++ {
+		w.tt.Move(x-float32(15*i), y-float32(8*i))
+	}
+	w.tt.Release(x-120, y-64)
+	w.tt.Frame()
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		rect, ok := w.tt.Find("Hello from a mod")
+		if ok && rect.X < start.X-60 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the float did not follow the drag; start %v, now %v\n%s", start, rect, w.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	offset, ok := current.Floats["hello"]
+	if !ok || offset[0] > -30 {
+		t.Fatalf("the drag offset was not saved: %+v", current.Floats)
+	}
+}
+
+// TestFloatingModPeek checks a peek float starts as a strip and expands on
+// hover, then collapses when the pointer leaves.
+func TestFloatingModPeek(t *testing.T) {
+	w := startWindow(t)
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "float", "id": "hello", "mod": "hello", "edge": "right",
+	     "align": "center", "width": 300, "height": 240, "peek": 52}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var strip ui.Rect
+	for {
+		w.tt.Frame()
+		if rect, ok := w.tt.Find("⋮ hello"); ok {
+			if strings.Contains(w.texts(), "Hello from a mod") {
+				t.Fatalf("the float did not start as a strip:\n%s", w.texts())
+			}
+			strip = rect
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the peek strip did not draw:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	w.tt.Move(strip.X+strip.W/2, strip.Y+strip.H/2)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		if strings.Contains(w.texts(), "Hello from a mod") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the peek did not expand on hover:\n%s", w.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.tt.Move(80, 80)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		if !strings.Contains(w.texts(), "Hello from a mod") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the peek did not collapse:\n%s", w.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestFloatingModSnaps checks a snap float springs back to the nearest edge
+// after a drag and saves the settled offset.
+func TestFloatingModSnaps(t *testing.T) {
+	w := startWindow(t)
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "float", "id": "hello", "mod": "hello", "edge": "right",
+	     "align": "center", "width": 300, "height": 240, "snap": true}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var start ui.Rect
+	for {
+		w.tt.Frame()
+		if rect, ok := w.tt.Find("Hello from a mod"); ok {
+			start = rect
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the float did not draw:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	x, y := start.X+20, start.Y+8
+	w.tt.Move(x, y)
+	w.tt.Press(x, y)
+	for i := 1; i <= 8; i++ {
+		w.tt.Move(x-float32(15*i), y)
+	}
+	w.tt.Release(x-120, y)
+	w.tt.Advance(500 * time.Millisecond)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		if rect, ok := w.tt.Find("Hello from a mod"); ok && absFloat32(rect.X-start.X) < 20 {
+			status, err := w.call(control.Request{Method: "status"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var current control.Status
+			if err := json.Unmarshal(status, &current); err != nil {
+				t.Fatal(err)
+			}
+			offset, ok := current.Floats["hello"]
+			if !ok || absFloat32(offset[0]) > 2 {
+				t.Fatalf("snapped offset = %v", offset)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			now, _ := w.tt.Find("Hello from a mod")
+			t.Fatalf("the float did not snap back; start %v, now %v", start, now)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// absFloat32 is a small pixel distance.
+func absFloat32(n float32) float32 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// TestLayoutResizesAndDividerDrags checks a fixed layout block's saved size
+// through the action, then by dragging the divider between it and the panes.
+func TestLayoutResizesAndDividerDrags(t *testing.T) {
+	w := startWindow(t)
+	layout := filepath.Join(w.dir, "config", "layouts", "main.json")
+	if err := os.WriteFile(layout, []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "workspaces", "id": "side", "size": {"px": 220}},
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "agents", "id": "agents", "size": {"px": 260}}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if strings.Contains(w.texts(), "Agents") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the resizable layout did not draw:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "layout.resize",
+		Args: map[string]any{"id": "side", "px": 300}}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Sizes["side"] != 300 {
+		t.Fatalf("sizes = %+v", current.Sizes)
+	}
+	// Drag the divider right by 40: the sidebar's fixed size grows.
+	x, y := float32(312), float32(300)
+	w.tt.Move(x, y)
+	w.tt.Press(x, y)
+	for i := 1; i <= 4; i++ {
+		w.tt.Move(x+float32(10*i), y)
+		w.tt.Frame()
+		w.run()
+	}
+	w.tt.Release(x+40, y)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		status, err := w.call(control.Request{Method: "status"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		current = control.Status{}
+		if err := json.Unmarshal(status, &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Sizes["side"] > 330 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the divider did not resize the sidebar: %+v", current.Sizes)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestMachinesPanelListsAndOpensRemoteTerminals checks a remote core's own
+// terminal appears in the panel and opens as a machine space.
+func TestMachinesPanelListsAndOpensRemoteTerminals(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	root, err := os.MkdirTemp("", "wada-mp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	appBin := filepath.Join(root, "wada-terminal")
+	if out, err := exec.Command("go", "build", "-o", appBin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("building: %v\n%s", err, out)
+	}
+	sshDir := filepath.Join(root, "ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+host=$1; shift
+export WADATERM_DATA_DIR="${FAKE_REMOTE_DATA:?}"
+exec sh -c "$*"
+`
+	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	remoteDir := filepath.Join(root, "remote")
+	t.Setenv("FAKE_REMOTE_DATA", remoteDir)
+	dataDir := filepath.Join(root, "data")
+	configDir := filepath.Join(dataDir, "config")
+	if err := os.MkdirAll(filepath.Join(configDir, "layouts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "machines.json"),
+		[]byte(`{"box": {"ssh": "box", "bin": "wada-terminal"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "agents.json"),
+		[]byte(`{"cat": {"command": ["cat"], "match": ["cat"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "layouts", "main.json"), []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "machines", "size": {"px": 280}}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowIn(t, sshDir+":"+root+":/usr/bin:/bin", dataDir, kerneltest.NewStore())
+	t.Cleanup(func() {
+		if body, err := os.ReadFile(filepath.Join(remoteDir, "core.json")); err == nil {
+			var instance struct {
+				PID int `json:"pid"`
+			}
+			if json.Unmarshal(body, &instance) == nil && instance.PID > 0 {
+				if proc, err := os.FindProcess(instance.PID); err == nil {
+					_ = proc.Kill()
+				}
+			}
+		}
+	})
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Machines") && strings.Contains(texts, "box") &&
+			strings.Contains(texts, "No running terminals") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the machines panel did not connect:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	remote, err := core.Connect(remoteDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Start(core.Start{Argv: []string{"/bin/cat"}, Kind: "shell",
+		Name: "remote-cat", Cols: 40, Rows: 10,
+		Labels: map[string]string{"space": "review"}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "remote-cat") && strings.Contains(texts, "review") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the remote terminal never appeared:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err := w.tt.Click("remote-cat"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	found := false
+	for !found {
+		w.run()
+		w.tt.Frame()
+		result, err := w.call(control.Request{Method: "ls"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list control.List
+		if err := json.Unmarshal(result, &list); err != nil {
+			t.Fatal(err)
+		}
+		for _, space := range list.Spaces {
+			if space.Machine != "box" || space.Name != "review" {
+				continue
+			}
+			for _, tab := range space.Tabs {
+				for _, pane := range tab.Panes {
+					if pane.Machine == "box" && strings.Contains(pane.Title, "remote-cat") {
+						found = true
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("clicking the remote terminal did not open it: %+v", list)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Save the space to the remote core, close it, and bring it back from the
+	// core's own document.
+	// The remote core's foreground process adopts the cat terminal.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		w.run()
+		result, err := w.call(control.Request{Method: "status"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var current control.Status
+		if err := json.Unmarshal(result, &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Pane != nil && current.Pane.Agent {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the remote foreground did not adopt the agent: %+v", current.Pane)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Saving the space publishes it to the remote core without an explicit
+	// export command.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		document, err := remote.Layout()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(document), "review") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remote layout = %s", document)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// A second window with no local spaces sees the remote document on its
+	// own when the panel connects.
+	data2 := filepath.Join(root, "data2")
+	config2 := filepath.Join(data2, "config")
+	if err := os.MkdirAll(filepath.Join(config2, "layouts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config2, "machines.json"),
+		[]byte(`{"box": {"ssh": "box", "bin": "wada-terminal"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config2, "layouts", "main.json"), []byte(`{
+	  "root": {"type": "row", "children": [
+	    {"type": "panes", "size": {"weight": 1}},
+	    {"type": "machines", "size": {"px": 280}}
+	  ]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w2 := startWindowIn(t, sshDir+":"+root+":/usr/bin:/bin", data2, kerneltest.NewStore())
+	deadline = time.Now().Add(20 * time.Second)
+	imported := false
+	for !imported {
+		w2.run()
+		result, err := w2.call(control.Request{Method: "ls"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list control.List
+		if err := json.Unmarshal(result, &list); err != nil {
+			t.Fatal(err)
+		}
+		for _, space := range list.Spaces {
+			if space.Machine == "box" && space.Name == "review" {
+				imported = true
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the second window did not import the remote space: %+v", list)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	w2.close()
+	if _, err := w.call(control.Request{Method: "do", Action: "space.close"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "space.import",
+		Args: map[string]any{"machine": "box"}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := w.call(control.Request{Method: "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list control.List
+	if err := json.Unmarshal(result, &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, space := range list.Spaces {
+		if space.Machine == "box" && space.Name == "review" {
+			return
+		}
+	}
+	t.Fatalf("the imported space is missing: %+v", list)
+}
+
+// TestFindBarSearchesThePane checks Cmd+F opens a find bar, typing finds the
+// shell's text and the bar reports a match, and the command closes it again.
+func TestFindBarSearchesThePane(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine("echo findme")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if strings.Contains(w.texts(), "findme") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never printed the search text:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.command("terminal.find")
+	if texts := w.texts(); !strings.Contains(texts, "Find") {
+		t.Fatalf("the find bar did not open:\n%s", texts)
+	}
+	w.tt.Type("findme")
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "/") && !strings.Contains(texts, "No matches") &&
+			!strings.Contains(texts, "Find in scrollback") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the find bar found nothing:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(30 * time.Millisecond)
+	}
+	w.command("terminal.find")
+	if texts := w.texts(); strings.Contains(texts, "Find in scrollback") {
+		t.Fatalf("the find bar did not close:\n%s", texts)
+	}
+}
+
+// TestScrollModeMovesThroughHistory checks the vi-like scroll mode takes keys
+// from the program, reports its offset, and leaves on q.
+func TestScrollModeMovesThroughHistory(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine("seq 1 100")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if hasLine(w.texts(), "100") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.command("terminal.scroll-mode")
+	if !strings.Contains(w.texts(), "SCROLL") {
+		t.Fatalf("scroll mode did not show:\n%s", w.texts())
+	}
+	for range 5 {
+		w.tt.Key(0, ui.KeyK)
+	}
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Pane == nil || !current.Pane.ScrollMode || current.Pane.Scrolled == 0 {
+		t.Fatalf("status pane = %+v", current.Pane)
+	}
+	w.tt.Key(0, ui.KeyQ)
+	status, err = w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = control.Status{}
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Pane == nil || current.Pane.ScrollMode || current.Pane.Scrolled != 0 {
+		t.Fatalf("after q = %+v", current.Pane)
+	}
+}
+
+// TestCustomAgentCommand starts an agents.json program from the Session menu,
+// marks it an agent, and keeps its name and glyph.
+func TestCustomAgentCommand(t *testing.T) {
+	bin := t.TempDir()
+	script := "#!/bin/sh\nprintf '\\033]7501;state=blocked:app=fake-code:title=RmFrZSBBZ2VudA==:msg=QXBwcm92ZQ==\\033\\\\'\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(bin, "fakeagent"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp("", "wada-agent-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agentsFile := filepath.Join(root, "config", "agents.json")
+	if err := os.WriteFile(agentsFile, []byte(`{
+	  "fake": {"name": "Fake Agent", "command": ["fakeagent"], "glyph": "F"}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowIn(t, bin+":/usr/bin:/bin", root, kerneltest.NewStore())
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		found := false
+		for _, item := range kernel.Items(w.s.Kernel, kernel.Commands) {
+			if item.ID == "terminal.agent-fake" {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the custom agent command never appeared")
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+	w.command("terminal.agent-fake")
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Fake Agent") && strings.Contains(texts, "Needs input") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the custom agent did not run:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(30 * time.Millisecond)
+	}
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Pane == nil || !current.Pane.Agent || current.Pane.Title != "Fake Agent" {
+		t.Fatalf("pane = %+v", current.Pane)
+	}
+	// The saved pane remembers which custom agent it ran.
+	w.close()
+	w = startWindowIn(t, bin+":/usr/bin:/bin", root, w.store)
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		result, err := w.call(control.Request{Method: "ls"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list control.List
+		if err := json.Unmarshal(result, &list); err != nil {
+			t.Fatal(err)
+		}
+		for _, space := range list.Spaces {
+			for _, tab := range space.Tabs {
+				for _, pane := range tab.Panes {
+					if pane.Title == "Fake Agent" && pane.Agent {
+						return
+					}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the custom agent was not restored: %+v", list)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestAgentsReload checks a new agents.json entry appears in the commands
+// without restarting the window.
+func TestAgentsReload(t *testing.T) {
+	w := startWindow(t)
+	path := filepath.Join(w.dir, "config", "agents.json")
+	if err := os.WriteFile(path, []byte(`{
+	  "late": {"name": "Late Agent", "command": ["lateagent"]}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		for _, item := range kernel.Items(w.s.Kernel, kernel.Commands) {
+			if item.ID == "terminal.agent-late" {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a saved agents.json did not add its command")
+		}
+		w.run()
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestLinkPickerListsURLs checks the link picker shows URLs before one opens
+// and closes without opening anything on Escape.
+func TestLinkPickerListsURLs(t *testing.T) {
+	w := startWindow(t)
+	linkFile := filepath.Join(w.dir, "links.txt")
+	body := "\x1b]8;;https://one.example/a\x07OneLink\x1b]8;;\x07 \x1b]8;;https://two.example/b\x07TwoLink\x1b]8;;\x07\n"
+	if err := os.WriteFile(linkFile, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.command("terminal.new-tab")
+	w.tt.Type("cat " + linkFile)
+	w.tt.Key(0, ui.KeyEnter)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "OneLink") && strings.Contains(texts, "TwoLink") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the links never printed:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.command("terminal.links")
+	texts := w.texts()
+	if !strings.Contains(texts, "https://one.example/a") || !strings.Contains(texts, "https://two.example/b") {
+		t.Fatalf("the link picker did not list the URLs:\n%s", texts)
+	}
+	w.tt.Key(0, ui.KeyEscape)
+	texts = w.texts()
+	if strings.Contains(texts, "Hyperlinks on this pane's screen") {
+		t.Fatalf("the link picker did not close:\n%s", texts)
+	}
+}
+
+// TestVisualSelectionCopiesLines checks v selects lines in scroll mode and y
+// copies them and clears the selection.
+func TestVisualSelectionCopiesLines(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine("seq 1 100")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if hasLine(w.texts(), "100") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.command("terminal.scroll-mode")
+	w.tt.Key(ui.Shift, ui.KeyV)
+	for range 3 {
+		w.tt.Key(0, ui.KeyJ)
+	}
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Pane == nil || !current.Pane.Visual || !current.Pane.VisualLinewise ||
+		current.Pane.VisualTo <= current.Pane.VisualFrom {
+		t.Fatalf("visual status = %+v", current.Pane)
+	}
+	w.tt.Key(0, ui.KeyY)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		texts := w.texts()
+		if strings.Contains(texts, "Copied") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the copy did not report:\n%s", texts)
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	status, err = w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = control.Status{}
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Pane == nil || current.Pane.Visual {
+		t.Fatalf("after copy = %+v", current.Pane)
+	}
+	if got := w.tt.Clipboard(); got == "" {
+		t.Fatal("the visual copy put nothing on the clipboard")
+	}
+}
+
+// TestCharacterVisualSelectsCells checks v selects by cell and h/l widen it.
+func TestCharacterVisualSelectsCells(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine("seq 1 100")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if hasLine(w.texts(), "100") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.command("terminal.scroll-mode")
+	w.tt.Key(0, ui.KeyV)
+	w.tt.Key(ui.Shift, ui.Key4)
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var atEnd control.Status
+	if err := json.Unmarshal(status, &atEnd); err != nil {
+		t.Fatal(err)
+	}
+	if atEnd.Pane == nil || atEnd.Pane.VisualToCol == 0 {
+		t.Fatalf("$ did not move to the line end: %+v", atEnd.Pane)
+	}
+	w.tt.Key(0, ui.Key0)
+	w.tt.Key(0, ui.KeyL)
+	w.tt.Key(0, ui.KeyJ)
+	status, err = w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	pane := current.Pane
+	if pane == nil || !pane.Visual || pane.VisualLinewise || pane.VisualToCol != 1 || pane.VisualFromCol != 0 {
+		t.Fatalf("character selection = %+v", pane)
+	}
+	w.tt.Key(0, ui.KeyY)
+	if got := w.tt.Clipboard(); got == "" {
+		t.Fatal("the character selection copied nothing")
+	}
+}
+
+// TestScrollModePastesClipboard checks p leaves scroll mode and types the
+// clipboard into the program.
+func TestScrollModePastesClipboard(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.tt.SetClipboard("echo from-scroll-mode")
+	w.command("terminal.scroll-mode")
+	w.tt.Key(0, ui.KeyP)
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Pane == nil || current.Pane.ScrollMode || current.Pane.Scrolled != 0 {
+		t.Fatalf("status = %+v", current.Pane)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if strings.Contains(w.texts(), "from-scroll-mode") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the paste never reached the shell:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestProgramTitleMatching adopts an agent named by programs.json when its
+// program sets the terminal title inside a shell.
+func TestProgramTitleMatching(t *testing.T) {
+	root, err := os.MkdirTemp("", "wada-match-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "agents.json"),
+		[]byte(`{"aider": {"command": ["aider"], "match": ["aider"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowIn(t, os.Getenv("PATH"), root, kerneltest.NewStore())
+	w.command("terminal.new-tab")
+	w.tt.Type("printf '\\033]2;aider\\007'; sleep 10")
+	w.tt.Key(0, ui.KeyEnter)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		result, err := w.call(control.Request{Method: "status"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var current control.Status
+		if err := json.Unmarshal(result, &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Pane != nil && current.Pane.Agent {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the title did not adopt the agent: %+v\n%s", current.Pane, w.texts())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestForegroundAdoptsAgent adopts a matched agent from the real foreground
+// process, not just its title.
+func TestForegroundAdoptsAgent(t *testing.T) {
+	root, err := os.MkdirTemp("", "wada-fg-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "agents.json"),
+		[]byte(`{"sleeper": {"command": ["sleep"], "match": ["sleep"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowIn(t, os.Getenv("PATH"), root, kerneltest.NewStore())
+	w.command("terminal.new-tab")
+	w.typeLine("sleep 5")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		result, err := w.call(control.Request{Method: "status"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var current control.Status
+		if err := json.Unmarshal(result, &current); err != nil {
+			t.Fatal(err)
+		}
+		if current.Pane != nil && current.Pane.Agent {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the foreground program did not adopt the agent: %+v\n%s", current.Pane, w.texts())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestVisualDeleteClearsSelection checks d drops the visual selection while
+// staying in scroll mode; scrollback itself is read-only.
+func TestVisualDeleteClearsSelection(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.command("terminal.scroll-mode")
+	w.tt.Key(0, ui.KeyV)
+	w.tt.Key(0, ui.KeyD)
+	status, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current control.Status
+	if err := json.Unmarshal(status, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Pane == nil || current.Pane.Visual || !current.Pane.ScrollMode {
+		t.Fatalf("after d = %+v", current.Pane)
+	}
+}
+
+// TestHoverLinkPreview clears a pane and prints a link at its top-left, then
+// moves the pointer there and looks for the URL preview.
+func TestHoverLinkPreview(t *testing.T) {
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.typeLine("printf '\\033[2J\\033[H\\033]8;;https://hover.example\\aHoverMe\\033]8;;\\a\\n'")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if strings.Contains(w.texts(), "HoverMe") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the linked text never drew:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	rect, ok := w.tt.Find("HoverMe")
+	if !ok {
+		t.Fatalf("the linked row is not a findable label:\n%s", w.texts())
+	}
+	w.tt.Move(rect.X+5, rect.Y+5)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		w.run()
+		if strings.Contains(w.texts(), "https://hover.example") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the hover preview never appeared:\n%s", w.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
