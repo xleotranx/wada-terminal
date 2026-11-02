@@ -167,8 +167,9 @@ func (w *window) command(id string) {
 	w.t.Fatalf("no command %q", id)
 }
 
-// TestWindowShowsWorkspaceAndTabs checks the frame has the workspace, the
-// sessions the app starts with and the way to open another.
+// TestWindowShowsWorkspaceAndTabs checks the frame has the workspace on show,
+// the label of its tabs, the sessions the app starts with, and the way to open
+// another tab. The other workspaces and a new one live behind the switcher.
 func TestWindowShowsWorkspaceAndTabs(t *testing.T) {
 	w := startWindow(t)
 	wd, err := os.Getwd()
@@ -176,7 +177,7 @@ func TestWindowShowsWorkspaceAndTabs(t *testing.T) {
 		t.Fatal(err)
 	}
 	texts := w.texts()
-	for _, want := range []string{filepath.Base(wd), "New tab", "New workspace"} {
+	for _, want := range []string{filepath.Base(wd), "New tab", "TABS"} {
 		if !strings.Contains(texts, want) {
 			t.Errorf("the frame does not show %q:\n%s", want, texts)
 		}
@@ -185,6 +186,53 @@ func TestWindowShowsWorkspaceAndTabs(t *testing.T) {
 	// each tab names a session, whatever program actually ran.
 	if got := strings.Count(texts, "Shell"); got == 0 && !strings.Contains(texts, "OpenCode") {
 		t.Errorf("the frame shows no session:\n%s", texts)
+	}
+}
+
+// TestWorkspaceSwitcherOpens checks that the row at the top of the column
+// opens the menu of workspaces, with the other one and the way to open a new
+// folder.
+func TestWorkspaceSwitcherOpens(t *testing.T) {
+	w := startWindow(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	switcher := filepath.Base(wd)
+	if strings.Contains(w.texts(), "New workspace…") {
+		t.Fatalf("the menu is open before it was asked for:\n%s", w.texts())
+	}
+	if err := w.tt.Click(switcher); err != nil {
+		t.Fatalf("no workspace switcher: %v", err)
+	}
+	texts := w.texts()
+	for _, want := range []string{switcher, "New workspace…", "1 tab"} {
+		if !strings.Contains(texts, want) {
+			t.Errorf("the open menu does not show %q:\n%s", want, texts)
+		}
+	}
+	// The switcher toggles: a second click closes what it opened.
+	if err := w.tt.Click(switcher); err != nil {
+		t.Fatal(err)
+	}
+	if texts := w.texts(); strings.Contains(texts, "New workspace…") {
+		t.Errorf("the switcher did not close the menu:\n%s", texts)
+	}
+	// The menu opens again, and choosing the home workspace shows it.
+	if err := w.tt.Click(switcher); err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home != "" && home != wd {
+		if err := w.tt.Click(filepath.Base(home)); err != nil {
+			t.Fatalf("the menu does not list the home workspace: %v", err)
+		}
+		if texts := w.texts(); !strings.Contains(texts, "~") {
+			t.Errorf("choosing the home workspace did not show its folder:\n%s", texts)
+		}
 	}
 }
 
@@ -1173,6 +1221,16 @@ exec sh -c "$*"
 	// A second window on the same store and data folder reattaches to the
 	// machine's terminals instead of starting new ones.
 	w = startWindowIn(t, sshDir+":"+root+":/usr/bin:/bin", w.dir, w.store)
+	w.texts()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The menu over the column lists every workspace with the machine it runs
+	// on, so the machine one is there to choose without opening it first.
+	if err := w.tt.Click(filepath.Base(wd)); err != nil {
+		t.Fatalf("no workspace switcher after reopening: %v", err)
+	}
 	deadline = time.Now().Add(15 * time.Second)
 	for {
 		texts := w.texts()

@@ -36,22 +36,29 @@ detached) and attaches to it; closing the window detaches, and reopening it
 attaches to the same programs and the saved layout. `WADATERM_CORE=off` keeps
 the older window-owned sessions. `WADATERM_DATA_DIR` keeps settings and the
 core elsewhere, `WADATERM_CAPTURE=/path.png` writes
-a screenshot and quits (`WADATERM_TAB=2` shows the second tab first and
-`WADATERM_INDEX=1` opens the Sessions, so a capture can show a split or the
-index), and `WADATERM_APPEARANCE=light` fixes the palette.
+a screenshot and quits (`WADATERM_TAB=2` shows the second tab first,
+`WADATERM_INDEX=1` opens the Sessions and `WADATERM_WORKSPACES=1` opens the
+workspace menu, so a capture can show a split, the index or the menu), and
+`WADATERM_APPEARANCE=light` fixes the palette.
 
 ## What it does
 
 - **Tabs and splits** — `⌘T` opens a tab, `⌘D` splits right, `⌘⇧D` splits down,
   `⌘⇧W` closes the pane, `⌘1`–`⌘9` show a tab. Drag the bar between two panes to
   give one more room; a tab closes from the ✕ on hover or a middle click.
-- **Workspaces, in a tree** — a workspace is a folder with its own tabs. The
-  section on show lists its tabs, each named after the pane you are in, with the
-  panes of a split nested under it behind a rule and a dot for what each program
-  is doing; the other workspaces collapse to a row with their most pressing
-  state. `+ New workspace` (`⌘⇧N`) picks a folder, `⌘⇧]` and `⌘⇧[` step between
-  them, and the app remembers them between runs. The first run opens the folder
-  the app was started in, with your home folder beside it. `⌘B` hides the column.
+- **Workspaces, one column** — a workspace is a folder with its own tabs. The
+  column shows the workspace you are in at its top; click it for the menu of
+  every workspace, with the folder of the one on show beneath it, whether each
+  other one is empty or how many tabs it holds, and whether its agents need
+  you. `New workspace…` in that menu (`⌘⇧N`) picks a folder, `⌘⇧]` and `⌘⇧[`
+  step between them, and the app remembers them between runs. The first run
+  opens the folder the app was started in, with your home folder beside it.
+  `⌘B` hides the column.
+- **Tabs, one level** — under a `TABS` label, one row per tab, named after the
+  pane you are in. A tab that splits shows its focused pane with the others
+  nested under it behind a rail, and a dot or a word says what each program is
+  doing: an agent that waits for you says `needs you`. The foot of the column
+  opens a tab (`⌘T`) and the Sessions.
 - **The Sessions** — `⌘⇧I`, the View menu or the row at the foot of the
   column opens an index of every session in the window, across workspaces, tabs
   and splits: its program, folder, tab and state. The session that needs you is

@@ -112,6 +112,8 @@ type Plugin struct {
 	nextID     int
 	drag       *branch // the split whose divider a drag holds
 	pick       kernel.Task
+	// workspaceMenu is the switcher at the top of the column being open.
+	workspaceMenu bool
 
 	// The Sessions: the overlay over the page, the row it has chosen,
 	// whether the chosen row should be scrolled into view, and the watcher
@@ -196,6 +198,10 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 	if os.Getenv("WADATERM_INDEX") != "" {
 		// A capture can show the index without opening it by hand.
 		t.openIndex()
+	}
+	if os.Getenv("WADATERM_WORKSPACES") != "" {
+		// A capture can show the workspace menu open.
+		t.workspaceMenu = true
 	}
 	return nil
 }
@@ -296,7 +302,7 @@ func (t *Plugin) commandSpecs() []commandSpec {
 		{"restart", 24, "Restart Pane", "Session", nil, t.restartFocused},
 		{"copy", 30, "Copy Selection", "", []string{"cmd+shift+c"}, t.copySelection},
 		{"select-all", 31, "Select All", "", []string{"cmd+shift+a"}, t.selectAll},
-		{"sidebar", 40, "Toggle Sidebar", "View", []string{"cmd+b"}, func() { t.sidebar.Set(!t.sidebar.Get()) }},
+		{"sidebar", 40, "Toggle Sidebar", "View", []string{"cmd+b"}, t.toggleSidebar},
 		{"font-larger", 41, "Larger Text", "View", []string{"cmd+="}, func() { t.zoomFont(1) }},
 		{"font-smaller", 42, "Smaller Text", "View", []string{"cmd+-"}, func() { t.zoomFont(-1) }},
 		{"font-reset", 43, "Actual Size", "View", []string{"cmd+0"}, func() { t.setFont(12.5) }},
@@ -548,12 +554,21 @@ func (t *Plugin) stepWorkspace(delta int) {
 	}
 	idx = (idx + delta + len(t.workspaces)) % len(t.workspaces)
 	t.current = t.workspaces[idx]
+	t.workspaceMenu = false
 	if t.current.focus == nil {
 		if tb := t.current.currentTab(); tb != nil {
 			t.current.focus = tb.focus
 		}
 	}
 	t.saveWorkspaces()
+}
+
+// toggleSidebar shows or hides the column beside the panes, and closes the
+// workspace menu it holds: a menu over a column that is gone points at
+// nothing.
+func (t *Plugin) toggleSidebar() {
+	t.workspaceMenu = false
+	t.sidebar.Set(!t.sidebar.Get())
 }
 
 // addTab appends a tab of one session to the workspace.

@@ -8,9 +8,13 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// defaultSidebarWidth is how wide the workspace tree is until a layout says
-// otherwise.
+// defaultSidebarWidth is how wide the column beside the panes is until a
+// layout says otherwise.
 const defaultSidebarWidth = 236
+
+// sidebarPathWidth is how many characters of a workspace's folder the column
+// shows before it keeps the last folders and drops the start.
+const sidebarPathWidth = 26
 
 // page draws the window's page as the layout's tree of workspaces, panes and
 // agents. It is the only place the window's chrome is arranged.
@@ -32,8 +36,10 @@ func (t *Plugin) page(c *ui.Context) {
 	t.modAnimated.Store(t.modAnimatedFrame)
 }
 
-// workspaceView is the tree on the left: every workspace, and the tabs and
-// panes of the one on show.
+// workspaceView is the column beside the panes: the workspace on show and the
+// menu that switches to another, its folder, its tabs, and the actions at its
+// foot. One workspace shows at a time, so the tabs are one level, not the
+// second level of a tree.
 func (t *Plugin) workspaceView(c *ui.Context, ch chrome, position blockPosition) ui.Element {
 	pal := ch.pal
 	side := ui.Column(c).MinWidth(0).MinHeight(0).Background(pal.DrawerBg)
@@ -47,88 +53,268 @@ func (t *Plugin) workspaceView(c *ui.Context, ch chrome, position blockPosition)
 	}
 	side.BorderColor(pal.Hairline).Padding(10, 8, 9, 8).Gap(1).
 		Children(func() {
-			ui.Scroll(c).Grow(1).FillWidth().MinHeight(0).Children(func() {
-				ui.Column(c).FillWidth().Gap(2).Children(func() {
-					for _, w := range t.workspaces {
-						t.workspaceSection(c, ch, w)
-					}
-				})
-			})
-			t.newTabRow(c, ch)
+			t.workspaceSwitcher(c, ch)
+			t.workspacePathLine(c, ch)
+			t.tabSection(c, ch)
+			t.sidebarFooter(c, ch)
 		})
 	return side
 }
 
-// workspaceSection is one workspace: its header, and when it is the one on
-// show, its folder and its tabs.
-func (t *Plugin) workspaceSection(c *ui.Context, ch chrome, w *workspace) {
+// workspaceSwitcher is the workspace on show as a control: its color, its
+// name, and the menu of the others.
+func (t *Plugin) workspaceSwitcher(c *ui.Context, ch chrome) {
+	pal := ch.pal
+	w := t.current
+	row := ui.Box(c).Height(32).FillWidth().Shrink(0).Radius(7).Padding(0, 7)
+	switch {
+	case t.workspaceMenu:
+		row = row.Background(pal.Selected)
+	case row.Hovered():
+		row = row.Background(pal.Selected)
+	default:
+		row = row.Background(pal.Hover)
+	}
+	row = row.Cursor(ui.CursorPointer)
+	row.Children(func() {
+		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(7).Children(func() {
+			if w == nil {
+				ui.Text(c, "No workspace").FontSize(12.5).TextColor(pal.Muted).Grow(1)
+				return
+			}
+			ui.Box(c).Width(8).Height(8).Radius(4).Shrink(0).Background(projectColor(ch, w.color))
+			ui.Text(c, w.name).FontSize(12.5).FontWeight(600).TextColor(pal.Text).
+				SingleLine().Ellipsis("…").Shrink(1).MinWidth(0).Grow(1)
+			chevronDown(c, pal.Muted)
+		})
+	})
+	row.OnClick(func() {
+		t.workspaceMenu = !t.workspaceMenu
+		t.repaint()
+	})
+	ui.PopoverBase(c, row, &t.workspaceMenu, func(panel ui.Element) {
+		t.workspaceMenuPanel(c, ch, row, panel)
+	})
+}
+
+// chevronDown draws the mark of a row that opens a menu below it.
+func chevronDown(c *ui.Context, color ui.Color) {
+	ui.Box(c).Width(9).Height(9).Shrink(0).Center().Draw(func(p *ui.Painter, r ui.Rect) {
+		var path ui.Path
+		path.MoveTo(r.X, r.Y+r.H*0.32).
+			LineTo(r.X+r.W/2, r.Y+r.H*0.72).
+			LineTo(r.X+r.W, r.Y+r.H*0.32)
+		p.StrokePath(&path, 1.3, color)
+	})
+}
+
+// workspaceMenuPanel lists every workspace with what it holds, and the way to
+// open another one. Empty workspaces say so instead of showing a count that
+// could mean several things.
+func (t *Plugin) workspaceMenuPanel(c *ui.Context, ch chrome, anchor, panel ui.Element) {
+	pal := ch.pal
+	width := anchor.Bounds().W
+	if width < 200 {
+		width = 200
+	}
+	panel.Width(width).Padding(5).Radius(10).Background(pal.PanelBg).
+		Border(1, pal.Hairline).Shadow(0, 10, 28, 0, ui.RGBA(0, 0, 0, 0.22))
+	panel.Children(func() {
+		ui.Scroll(c).FillWidth().MaxHeight(320).Children(func() {
+			ui.Column(c).FillWidth().Gap(1).Children(func() {
+				for _, w := range t.workspaces {
+					t.workspaceMenuRow(c, ch, w)
+				}
+			})
+		})
+		ui.Box(c).Height(1).FillWidth().Background(pal.Hairline).Margin(4, 0, 4, 0)
+		t.menuActionRow(c, ch, "New workspace…", "⌘⇧N", func() {
+			t.workspaceMenu = false
+			t.pickWorkspace()
+		})
+	})
+}
+
+// workspaceMenuRow is one workspace in the menu: its color, its name, and what
+// it asks of the user. The close button takes the row's place while the
+// pointer is on it.
+func (t *Plugin) workspaceMenuRow(c *ui.Context, ch chrome, w *workspace) {
 	pal := ch.pal
 	current := w == t.current
-	header := ui.Box(c).Height(30).FillWidth().Shrink(0).Radius(7).Padding(0, 6)
+	row := ui.Box(c).Height(30).FillWidth().Shrink(0).Radius(6).Padding(0, 7)
 	switch {
 	case current:
-		header.Background(pal.Hover)
-	case header.Hovered():
-		header.Background(pal.Hover)
+		row.Background(pal.Selected)
+	case row.Hovered():
+		row.Background(pal.Hover)
 	}
-	header.Cursor(ui.CursorPointer)
-	header.Children(func() {
+	row.Cursor(ui.CursorPointer)
+	hovered := row.Hovered()
+	row.Children(func() {
 		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(7).Children(func() {
-			ui.Box(c).Width(8).Height(8).Shrink(0).Radius(4).Background(projectColor(ch, w.color))
-			color := pal.Muted
-			if current {
-				color = pal.Text
-			}
-			ui.Text(c, w.name).FontSize(12.5).FontWeight(600).TextColor(color).
-				SingleLine().Ellipsis("…").Grow(1)
+			ui.Box(c).Width(8).Height(8).Radius(4).Shrink(0).Background(projectColor(ch, w.color))
+			ui.Text(c, w.name).FontSize(12).FontWeight(600).TextColor(pal.Text).
+				SingleLine().Ellipsis("…").Shrink(1).MinWidth(0).Grow(1)
 			if w.machine != "" {
 				ui.Text(c, w.machine).FontSize(8.5).TextColor(pal.Link).Shrink(0).
 					MaxWidth(58).SingleLine().Ellipsis("…")
 			}
-			if st, n := w.rollup(); n > 0 {
-				ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(4).Children(func() {
-					ui.Box(c).Width(6).Height(6).Radius(3).Background(stateColor(ch, st))
-					ui.Text(c, strconv.Itoa(n)).FontSize(10).TextColor(stateColor(ch, st))
-				})
-			} else if !current {
-				ui.Text(c, strconv.Itoa(len(w.tabs))).FontSize(10).TextColor(pal.Faint)
-			}
-			if current && len(t.workspaces) > 1 && header.Hovered() {
+			if hovered && len(t.workspaces) > 1 {
 				t.closeWorkspaceButton(c, ch, w)
+				return
 			}
+			t.workspaceMenuMeta(c, ch, w)
 		})
 	})
-	header.OnClick(func() { t.selectWorkspace(w) })
-	if !current {
+	row.OnClick(func() {
+		t.workspaceMenu = false
+		t.selectWorkspace(w)
+	})
+}
+
+// workspaceMenuMeta is what a workspace holds, said in words: the agents that
+// need the user first, else how many tabs it has.
+func (t *Plugin) workspaceMenuMeta(c *ui.Context, ch chrome, w *workspace) {
+	pal := ch.pal
+	if st, n := w.rollup(); n > 0 {
+		ui.Text(c, rollupLabel(st, n)).FontSize(9.5).TextColor(stateColor(ch, st)).Shrink(0)
 		return
 	}
-	line := shortenHome(w.dir)
-	if w.machine != "" {
-		if line == "" {
-			line = "remote"
-		}
-		line = w.machine + " · " + line
-	}
-	ui.Text(c, line).Font("monospace").FontSize(9.5).TextColor(pal.Faint).
-		SingleLine().Ellipsis("…").Padding(0, 0, 0, 15).Shrink(0)
-	for i, tb := range w.tabs {
-		t.tabTree(c, ch, w, i, tb)
+	switch len(w.tabs) {
+	case 0:
+		ui.Text(c, "empty").FontSize(9.5).TextColor(pal.Faint).Shrink(0)
+	case 1:
+		ui.Text(c, "1 tab").FontSize(9.5).TextColor(pal.Faint).Shrink(0)
+	default:
+		ui.Text(c, strconv.Itoa(len(w.tabs))+" tabs").FontSize(9.5).TextColor(pal.Faint).Shrink(0)
 	}
 }
 
-// closeWorkspaceButton closes a workspace from its header, which only shows
-// while the pointer is on it.
-func (t *Plugin) closeWorkspaceButton(c *ui.Context, ch chrome, w *workspace) {
-	pal := ch.pal
-	btn := ui.Box(c).Width(16).Height(16).Shrink(0).Radius(4).Center()
-	if btn.Hovered() {
-		btn.Background(pal.Raised)
+// rollupLabel says how many agents of a workspace are in a state.
+func rollupLabel(st agentState, n int) string {
+	switch st {
+	case agentBlocked:
+		if n == 1 {
+			return "needs you"
+		}
+		return strconv.Itoa(n) + " waiting"
+	case agentDone:
+		if n == 1 {
+			return "done"
+		}
+		return strconv.Itoa(n) + " done"
+	case agentWorking:
+		if n == 1 {
+			return "working"
+		}
+		return strconv.Itoa(n) + " working"
+	default:
+		return ""
 	}
-	btn.Cursor(ui.CursorPointer)
-	btn.Children(func() {
-		ui.Text(c, "✕").FontSize(9).TextColor(pal.Faint)
+}
+
+// menuActionRow is a verb at the foot of the workspace menu.
+func (t *Plugin) menuActionRow(c *ui.Context, ch chrome, label, key string, fn func()) {
+	pal := ch.pal
+	row := ui.Box(c).Height(28).FillWidth().Shrink(0).Radius(6).Padding(0, 7)
+	if row.Hovered() {
+		row.Background(pal.Hover)
+	}
+	row.Cursor(ui.CursorPointer)
+	row.Children(func() {
+		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(7).Children(func() {
+			ui.Box(c).Width(8).Shrink(0).Center().Children(func() {
+				ui.Text(c, "+").FontSize(12).TextColor(pal.Faint)
+			})
+			ui.Text(c, label).FontSize(11.5).TextColor(pal.Muted).Grow(1).SingleLine()
+			ui.Text(c, key).FontSize(10).TextColor(pal.Faint).Shrink(0)
+		})
 	})
-	btn.OnClick(func() { t.closeWorkspace(w) })
+	row.OnClick(fn)
+}
+
+// workspacePathLine is the folder of the workspace on show, under its name,
+// with the machine it runs on when it is not this computer.
+func (t *Plugin) workspacePathLine(c *ui.Context, ch chrome) {
+	w := t.current
+	if w == nil {
+		return
+	}
+	line := workspaceDirLine(w.dir, w.machine)
+	if line == "" {
+		return
+	}
+	ui.Text(c, line).Font("monospace").FontSize(9.5).
+		TextColor(ch.pal.Faint).SingleLine().Ellipsis("…").Shrink(0).
+		Padding(1, 7, 3, 22)
+}
+
+// tabSection is the tabs of the workspace on show, under a label that names
+// them, so they are not mistaken for workspaces.
+func (t *Plugin) tabSection(c *ui.Context, ch chrome) {
+	pal := ch.pal
+	w := t.current
+	ui.Row(c).Height(18).FillWidth().Shrink(0).Margin(9, 0, 0, 0).Padding(0, 7).
+		AlignItems(ui.Center).Children(func() {
+		ui.Text(c, "TABS").FontSize(9.5).FontWeight(600).LetterSpacing(0.6).
+			TextColor(pal.Faint).Grow(1).SingleLine()
+		if w != nil && len(w.tabs) > 0 {
+			ui.Text(c, strconv.Itoa(len(w.tabs))).FontSize(9.5).TextColor(pal.Faint).
+				Shrink(0)
+		}
+	})
+	ui.Scroll(c).Grow(1).FillWidth().MinHeight(0).Children(func() {
+		ui.Column(c).FillWidth().Gap(1).Children(func() {
+			if w == nil || len(w.tabs) == 0 {
+				ui.Text(c, "No tabs open").FontSize(11).TextColor(pal.Faint).
+					Padding(4, 7)
+				return
+			}
+			for i, tb := range w.tabs {
+				t.tabTree(c, ch, w, i, tb)
+			}
+		})
+	})
+}
+
+// sidebarFooter is the foot of the column: what opens a tab, and the index of
+// every session. Creation comes first and navigation last.
+func (t *Plugin) sidebarFooter(c *ui.Context, ch chrome) {
+	pal := ch.pal
+	ui.Column(c).FillWidth().Shrink(0).Gap(1).Children(func() {
+		ui.Box(c).Height(1).FillWidth().Background(pal.Hairline).Margin(7, 2, 7, 2)
+		t.footerAction(c, ch, "+", "New tab", "⌘T", func() { t.newTab(kindShell) })
+		t.footerAction(c, ch, "⌗", "Sessions", "⌘⇧I", t.openIndex)
+	})
+}
+
+// footerAction is one row at the foot of the column, with the key that does the
+// same from the keyboard.
+func (t *Plugin) footerAction(c *ui.Context, ch chrome, glyph, label, key string, fn func()) {
+	pal := ch.pal
+	row := ui.Box(c).Height(28).FillWidth().Shrink(0).Radius(6).Padding(0, 7)
+	if row.Hovered() {
+		row.Background(pal.Hover)
+	}
+	row.Cursor(ui.CursorPointer)
+	row.Children(func() {
+		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(7).Children(func() {
+			ui.Box(c).Width(14).Shrink(0).Center().Children(func() {
+				ui.Text(c, glyph).FontSize(11.5).TextColor(pal.Muted)
+			})
+			ui.Text(c, label).FontSize(11.5).TextColor(pal.Muted).Grow(1).
+				SingleLine().Ellipsis("…")
+			ui.Text(c, key).FontSize(10).TextColor(pal.Faint).Shrink(0)
+		})
+	})
+	row.OnClick(fn)
+}
+
+// repaint asks for a frame after a change the frame being built did not see.
+func (t *Plugin) repaint() {
+	if t.ctx != nil {
+		t.ctx.Invalidate()
+	}
 }
 
 // projectColor is the color a workspace takes from the palette, by its index.
@@ -138,10 +324,51 @@ func projectColor(ch chrome, i int) ui.Color {
 
 // shortenHome writes a path under the home folder with a leading ~.
 func shortenHome(dir string) string {
-	if home := homeDir(); home != "" && dir != home && strings.HasPrefix(dir, home+string(filepath.Separator)) {
+	home := homeDir()
+	switch {
+	case home == "":
+		return dir
+	case dir == home:
+		return "~"
+	case strings.HasPrefix(dir, home+string(filepath.Separator)):
 		return "~" + strings.TrimPrefix(dir, home)
 	}
 	return dir
+}
+
+// workspaceDirLine is the folder a workspace shows under its name, with the
+// machine it runs on and its tail kept when it is too long for the column.
+func workspaceDirLine(dir, machine string) string {
+	line := shortenHome(dir)
+	if machine != "" {
+		if line == "" {
+			line = "remote"
+		}
+		return machine + " · " + fitPath(line, sidebarPathWidth-len([]rune(machine))-3)
+	}
+	return fitPath(line, sidebarPathWidth)
+}
+
+// fitPath shortens a path to width characters, keeping whole folders from the
+// end: the project's name is what tells two workspaces apart, so it is the
+// last thing dropped.
+func fitPath(path string, width int) string {
+	runes := []rune(path)
+	if len(runes) <= width || width < 8 {
+		return path
+	}
+	start := len(runes) - (width - 2)
+	// A suffix that already starts a folder needs no cut; one that starts
+	// inside a name moves to the next separator.
+	if start > 0 && runes[start-1] != '/' {
+		if i := strings.IndexRune(string(runes[start:]), '/'); i >= 0 {
+			start += i + 1
+		}
+	}
+	if start >= len(runes) {
+		return "…/" + string(runes[len(runes)-width+2:])
+	}
+	return "…/" + string(runes[start:])
 }
 
 // selectWorkspace shows a workspace and its focused pane.
@@ -150,6 +377,7 @@ func (t *Plugin) selectWorkspace(w *workspace) {
 		return
 	}
 	t.current = w
+	t.workspaceMenu = false
 	if w.focus == nil {
 		if tb := w.currentTab(); tb != nil {
 			w.focus = tb.focus
@@ -158,8 +386,8 @@ func (t *Plugin) selectWorkspace(w *workspace) {
 	t.seen(w.focus)
 }
 
-// tabTree draws one tab of the tree: its row when it holds one pane, or the
-// focused pane and, under it, the other panes of the split.
+// tabTree draws one tab: its row when it holds one pane, or the focused pane
+// and, under it behind a rail, the other panes of the split.
 func (t *Plugin) tabTree(c *ui.Context, ch chrome, w *workspace, i int, tb *tab) {
 	panes := tb.root.sessions(nil)
 	if len(panes) == 0 {
@@ -175,15 +403,27 @@ func (t *Plugin) tabTree(c *ui.Context, ch chrome, w *workspace, i int, tb *tab)
 		focused = panes[0]
 	}
 	t.groupRow(c, ch, tb, focused, active)
-	for _, s := range panes {
-		if s != focused {
-			t.treeRow(c, ch, s, active && w.focus == s, true)
-		}
-	}
+	// The other panes sit behind a rail: an indent of their own, then a box
+	// whose left border runs down them, so the row cannot grow past the
+	// column's edge.
+	ui.Row(c).FillWidth().Shrink(0).Children(func() {
+		ui.Box(c).Width(14).Shrink(0)
+		ui.Box(c).Grow(1).MinWidth(0).BorderWidth(0, 0, 0, 1).
+			BorderColor(ch.pal.Hairline).Padding(0, 0, 0, 6).Children(func() {
+			ui.Column(c).FillWidth().Gap(1).Children(func() {
+				for _, s := range panes {
+					if s != focused {
+						t.treeRow(c, ch, s, active && w.focus == s, true)
+					}
+				}
+			})
+		})
+	})
 }
 
-// treeRow is one pane in the tree: its icon, its title, and whether its
-// program runs. A row under a split tab is indented behind a rule.
+// treeRow is one pane in the tabs: its icon, its title, and what its program
+// is doing. A pane under a split is smaller: the rail above says it belongs to
+// the tab it sits under.
 func (t *Plugin) treeRow(c *ui.Context, ch chrome, s *session, selected, child bool) {
 	pal := ch.pal
 	height, radius := float32(30), float32(7)
@@ -200,9 +440,6 @@ func (t *Plugin) treeRow(c *ui.Context, ch chrome, s *session, selected, child b
 	row.Cursor(ui.CursorPointer)
 	row.Children(func() {
 		ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(8).Children(func() {
-			if child {
-				ui.Box(c).Width(1).FillHeight().Background(pal.Hairline)
-			}
 			size := float32(17)
 			if child {
 				size = 14
@@ -218,7 +455,7 @@ func (t *Plugin) treeRow(c *ui.Context, ch chrome, s *session, selected, child b
 			}
 			ui.Text(c, s.title()).FontSize(fontSize).TextColor(color).SingleLine().Ellipsis("…").
 				Shrink(1).MinWidth(0).Grow(1)
-			t.stateDot(c, ch, s, selected)
+			t.sessionBadge(c, ch, s, selected)
 		})
 	})
 	row.OnClick(func() { t.focusOn(s) })
@@ -248,7 +485,7 @@ func (t *Plugin) groupRow(c *ui.Context, ch chrome, tb *tab, focused *session, a
 						ui.Text(c, strconv.Itoa(n)).FontSize(9.5).TextColor(pal.Muted)
 					})
 			}
-			t.stateDot(c, ch, focused, true)
+			t.sessionBadge(c, ch, focused, true)
 		})
 	})
 	row.OnClick(func() { t.focusOn(focused) })
@@ -274,63 +511,50 @@ func (t *Plugin) layoutMark(c *ui.Context, ch chrome, tb *tab) {
 	})
 }
 
-// stateDot says what a pane holds: working, waiting on the user, done, idle
-// or stopped.
-func (t *Plugin) stateDot(c *ui.Context, ch chrome, s *session, strong bool) {
-	color := sessionStateColor(ch, s)
+// sessionBadge says what a pane holds: working, waiting on the user, done,
+// idle or stopped. A pane that needs the user says so in words, so the colors
+// alone do not have to carry it.
+func (t *Plugin) sessionBadge(c *ui.Context, ch chrome, s *session, strong bool) {
+	pal := ch.pal
+	if s.isAgent() {
+		switch s.agentState() {
+		case agentBlocked:
+			ui.Box(c).Height(17).Shrink(0).Padding(0, 5).Radius(4).
+				Background(pal.Raised).Center().Children(func() {
+				ui.Text(c, "needs you").FontSize(9.5).FontWeight(600).TextColor(pal.Waiting)
+			})
+			return
+		case agentDone:
+			ui.Box(c).Height(17).Shrink(0).Padding(0, 5).Radius(4).
+				Background(pal.Raised).Center().Children(func() {
+				ui.Text(c, "done").FontSize(9.5).FontWeight(600).TextColor(pal.Link)
+			})
+			return
+		}
+	}
 	size := float32(6)
 	if !strong {
 		size = 5
 	}
-	ui.Box(c).Width(size).Height(size).Shrink(0).Radius(size / 2).Background(color)
+	ui.Box(c).Width(size).Height(size).Shrink(0).Radius(size / 2).
+		Background(sessionStateColor(ch, s))
 }
 
-// newTabRow is the foot of the tree: it opens the Sessions, a tab of a
-// shell, and a workspace.
-func (t *Plugin) newTabRow(c *ui.Context, ch chrome) {
+// closeWorkspaceButton closes a workspace from its row in the menu, which only
+// shows while the pointer is on it.
+func (t *Plugin) closeWorkspaceButton(c *ui.Context, ch chrome, w *workspace) {
 	pal := ch.pal
-	ui.Column(c).FillWidth().Shrink(0).Gap(1).Children(func() {
-		index := ui.Box(c).Height(28).FillWidth().Radius(7).Padding(0, 8)
-		if index.Hovered() {
-			index.Background(pal.Hover)
-		}
-		index.Cursor(ui.CursorPointer)
-		index.Children(func() {
-			ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(8).Children(func() {
-				ui.Text(c, "⌗").FontSize(12).TextColor(pal.Faint)
-				ui.Text(c, "Sessions").FontSize(12).TextColor(pal.Faint).Grow(1)
-				ui.Text(c, "⌘⇧I").FontSize(10).TextColor(pal.Hairline)
-			})
-		})
-		index.OnClick(t.openIndex)
-
-		row := ui.Box(c).Height(28).FillWidth().Radius(7).Padding(0, 8)
-		if row.Hovered() {
-			row.Background(pal.Hover)
-		}
-		row.Cursor(ui.CursorPointer)
-		row.Children(func() {
-			ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(8).Children(func() {
-				ui.Text(c, "+").FontSize(13).TextColor(pal.Faint)
-				ui.Text(c, "New tab").FontSize(12).TextColor(pal.Faint).Grow(1)
-				ui.Text(c, "⌘T").FontSize(10).TextColor(pal.Hairline)
-			})
-		})
-		row.OnClick(func() { t.newTab(kindShell) })
-
-		space := ui.Box(c).Height(28).FillWidth().Radius(7).Padding(0, 8)
-		if space.Hovered() {
-			space.Background(pal.Hover)
-		}
-		space.Cursor(ui.CursorPointer)
-		space.Children(func() {
-			ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(8).Children(func() {
-				ui.Text(c, "+").FontSize(13).TextColor(pal.Faint)
-				ui.Text(c, "New workspace").FontSize(12).TextColor(pal.Faint).Grow(1)
-				ui.Text(c, "⌘⇧N").FontSize(10).TextColor(pal.Hairline)
-			})
-		})
-		space.OnClick(t.pickWorkspace)
+	btn := ui.Box(c).Width(16).Height(16).Shrink(0).Radius(4).Center()
+	if btn.Hovered() {
+		btn.Background(pal.Raised)
+	}
+	btn.Cursor(ui.CursorPointer)
+	btn.Children(func() {
+		ui.Text(c, "✕").FontSize(9).TextColor(pal.Faint)
+	})
+	btn.OnClick(func() {
+		t.workspaceMenu = false
+		t.closeWorkspace(w)
 	})
 }
 
@@ -535,7 +759,7 @@ func (t *Plugin) actions(c *ui.Context) {
 		if st, n := t.attention(); n > 0 {
 			t.attentionButton(c, ch, st, n)
 		}
-		t.actionButton(c, ch, "▤", func() { t.sidebar.Set(!t.sidebar.Get()) })
+		t.actionButton(c, ch, "▤", t.toggleSidebar)
 		t.actionButton(c, ch, "◫", func() { t.splitFocused(true) })
 		t.actionButton(c, ch, "+", func() { t.newTab(kindShell) })
 	})
@@ -622,7 +846,7 @@ func (t *Plugin) titleActions(c *ui.Context) ui.Element {
 		if st, n := t.attention(); n > 0 {
 			t.attentionButton(c, ch, st, n)
 		}
-		t.actionButton(c, ch, "▤", func() { t.sidebar.Set(!t.sidebar.Get()) })
+		t.actionButton(c, ch, "▤", t.toggleSidebar)
 		t.actionButton(c, ch, "◫", func() { t.splitFocused(true) })
 		t.actionButton(c, ch, "+", func() { t.newTab(kindShell) })
 	})
