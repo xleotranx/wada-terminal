@@ -81,7 +81,7 @@ func TestRejectsAmbiguousTaskInputs(t *testing.T) {
 	if _, err := Create(ctx, "", t.TempDir(), "Task"); err == nil {
 		t.Fatal("empty folder used process working directory")
 	}
-	if _, err := Review(ctx, Task{Dir: dir, Base: "--ext-diff"}); err == nil {
+	if _, err := Review(ctx, Task{Run: Run{Dir: dir, Base: "--ext-diff"}}); err == nil {
 		t.Fatal("accepted an option as the task base")
 	}
 }

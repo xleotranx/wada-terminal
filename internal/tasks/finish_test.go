@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,15 @@ func TestFinishSavesWorkAndRemovesFolder(t *testing.T) {
 	original, _ := os.ReadFile(filepath.Join(source, "a.txt"))
 	if string(original) != "original\n" {
 		t.Fatal("source changed")
+	}
+	task.Finished, task.BranchKept, task.Dir = true, result.BranchKept, ""
+	review, err := ReviewFinished(ctx, task)
+	if err != nil || !strings.Contains(review.Text, "+fixed") || !strings.Contains(review.Text, "+new") {
+		t.Fatalf("cannot review retained result: %v\n%s", err, review.Text)
+	}
+	task.Branch = "--ext-diff"
+	if _, err := ReviewFinished(ctx, task); err == nil {
+		t.Fatal("accepted invalid branch")
 	}
 }
 

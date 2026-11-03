@@ -24,6 +24,10 @@ func (t *Plugin) page(c *ui.Context) {
 	t.modAnimatedFrame = false
 	page := ui.Box(c).Fill().MinWidth(0).MinHeight(0).Background(ch.pal.PanelBg)
 	page.Children(func() {
+		if t.taskInboxOpen {
+			t.taskInbox(c, ch)
+			return
+		}
 		root := t.layoutTree()
 		t.blockElement(c, ch, root, axisNone, posOnly, "root")
 		for _, block := range t.floatingBlocks(root) {
@@ -60,7 +64,6 @@ func (t *Plugin) workspaceView(c *ui.Context, ch chrome, position blockPosition)
 		Children(func() {
 			t.workspaceSwitcher(c, ch)
 			t.workspacePathLine(c, ch)
-			t.taskList(c, ch)
 			t.tabSection(c, ch)
 			t.sidebarFooter(c, ch)
 		})
@@ -294,6 +297,7 @@ func (t *Plugin) sidebarFooter(c *ui.Context, ch chrome) {
 	pal := ch.pal
 	ui.Column(c).FillWidth().Shrink(0).Gap(1).Children(func() {
 		ui.Box(c).Height(1).FillWidth().Background(pal.Hairline).Margin(7, 2, 7, 2)
+		t.footerAction(c, ch, "☷", "Tasks", "⌘⇧J", t.openTaskInbox)
 		t.footerAction(c, ch, "+", "New task…", "⌘⇧T", t.openTaskDialog)
 		t.footerAction(c, ch, "+", "New terminal", "⌘T", func() { t.newTab(kindShell) })
 		t.footerAction(c, ch, "⌗", "All terminals", "⌘⇧I", t.openIndex)
@@ -385,7 +389,11 @@ func fitPath(path string, width int) string {
 
 // selectWorkspace shows a workspace and its focused pane.
 func (t *Plugin) selectWorkspace(w *workspace) {
-	if w == nil || w == t.current {
+	if w == nil {
+		return
+	}
+	t.taskInboxOpen = false
+	if w == t.current {
 		return
 	}
 	t.current = w

@@ -318,6 +318,9 @@ func (t *Plugin) buildWorkspace(spec workspaceSpec, client *core.Client, sameCor
 	if w.dir == "" && w.machine == "" {
 		w.dir = homeDir()
 	}
+	if w.task != nil && w.task.Dir == "" {
+		return w // A queued task does not own a terminal yet.
+	}
 	for _, ts := range spec.Tabs {
 		tb := &tab{id: t.nextID, name: ts.Name}
 		t.nextID++

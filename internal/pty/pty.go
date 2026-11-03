@@ -41,6 +41,7 @@ type Session struct {
 	tty    *os.File
 	mu     sync.Mutex
 	gone   bool
+	closed bool
 	waited bool
 	err    error
 }
@@ -118,10 +119,11 @@ func (s *Session) Wait() error {
 		s.mu.Unlock()
 		return err
 	}
-	s.waited, s.gone = true, true
+	s.waited = true
 	s.mu.Unlock()
 	err := s.cmd.Wait()
 	s.mu.Lock()
+	s.gone = true
 	s.err = err
 	s.mu.Unlock()
 	return err
@@ -131,14 +133,16 @@ func (s *Session) Wait() error {
 // It is idempotent.
 func (s *Session) Close() error {
 	s.mu.Lock()
-	if s.gone {
+	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
+	s.closed = true
+	running := !s.gone
 	s.gone = true
 	pid := s.PID()
 	s.mu.Unlock()
-	if pid > 0 {
+	if running && pid > 0 {
 		// The program leads the session it runs in, so its group goes too.
 		_ = syscall.Kill(-pid, syscall.SIGHUP)
 	}

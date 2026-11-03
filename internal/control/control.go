@@ -78,7 +78,8 @@ func Listen(dataDir string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	if _, err := net.DialTimeout("unix", path, 200*time.Millisecond); err == nil {
+	if conn, err := net.DialTimeout("unix", path, 200*time.Millisecond); err == nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("another window is already listening at %s", path)
 	}
 	_ = os.Remove(path)

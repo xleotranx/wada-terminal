@@ -21,15 +21,72 @@ import (
 )
 
 type Task struct {
-	Ready  bool   `json:"ready,omitempty"`
-	Name   string `json:"name"`
-	Brief  string `json:"brief,omitempty"`
-	Repo   string `json:"repo"`
-	Dir    string `json:"dir"`
-	Branch string `json:"branch"`
-	Base   string `json:"base"`
-	Check  *Check `json:"check,omitempty"`
+	Name  string `json:"name"`
+	Brief string `json:"brief,omitempty"`
+	Repo  string `json:"repo"`
+	Run
+	Runs []Run `json:"previousRuns,omitempty"`
 }
+
+// Run records one isolated attempt. The embedded run is the current attempt;
+// earlier attempts remain in Runs after a retry.
+type Run struct {
+	SentAt           *time.Time `json:"sentAt,omitempty"`
+	SentName         string     `json:"sentName,omitempty"`
+	SentBrief        string     `json:"sentBrief,omitempty"`
+	SentProgram      string     `json:"sentProgram,omitempty"`
+	Brief            string     `json:"runBrief,omitempty"`
+	StartedAt        time.Time  `json:"startedAt,omitempty"`
+	FinishedAt       time.Time  `json:"finishedAt,omitempty"`
+	IntegratedCommit string     `json:"integratedCommit,omitempty"`
+	IntegratedTarget string     `json:"integratedTarget,omitempty"`
+	Finished         bool       `json:"finished,omitempty"`
+	BranchKept       bool       `json:"branchKept,omitempty"`
+	Discarded        bool       `json:"discarded,omitempty"`
+	Agent            string     `json:"agent,omitempty"`
+	Ready            bool       `json:"ready,omitempty"`
+	Dir              string     `json:"dir"`
+	Branch           string     `json:"branch"`
+	Base             string     `json:"base"`
+	Check            *Check     `json:"check,omitempty"`
+}
+
+// ReviewFinished reads committed changes from a retained branch after cleanup.
+func ReviewFinished(ctx context.Context, t Task) (Changes, error) {
+	if !t.Finished || !t.BranchKept || !strings.HasPrefix(t.Branch, "wada/task-") || len(t.Branch) != len("wada/task-")+16 {
+		return Changes{}, fmt.Errorf("no retained task branch to review")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(t.Branch, "wada/task-")); err != nil {
+		return Changes{}, fmt.Errorf("invalid task branch")
+	}
+	if len(t.Base) != 40 && len(t.Base) != 64 {
+		return Changes{}, fmt.Errorf("invalid task starting commit")
+	}
+	if _, err := hex.DecodeString(t.Base); err != nil {
+		return Changes{}, fmt.Errorf("invalid task starting commit")
+	}
+	diff, err := git(ctx, t.Repo, "diff", "--no-ext-diff", "--no-textconv", "--binary", t.Base, "refs/heads/"+t.Branch, "--")
+	if err != nil {
+		return Changes{}, err
+	}
+	if diff == "" {
+		diff = "No committed changes from the task's starting commit."
+	}
+	return Changes{Text: diff}, nil
+}
+
+// Draft validates a task without creating a branch or worktree.
+func Draft(name, brief, repo, agent string) (Task, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 160 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return Task{}, fmt.Errorf("enter a task name of 1–160 characters on one line")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return Task{}, fmt.Errorf("choose a local Git repository")
+	}
+	return Task{Name: name, Brief: brief, Repo: repo, Run: Run{Agent: agent}}, nil
+}
+
 type Check struct {
 	Command  string    `json:"command"`
 	ExitCode int       `json:"exitCode"`
@@ -115,7 +172,7 @@ func Create(ctx context.Context, repo, root, name string) (Task, error) {
 	if _, err = git(ctx, repo, "worktree", "add", "-b", branch, "--", dir, strings.TrimSpace(base)); err != nil {
 		return Task{}, err
 	}
-	return Task{Name: name, Repo: repo, Dir: dir, Branch: branch, Base: strings.TrimSpace(base)}, nil
+	return Task{Name: name, Repo: repo, Run: Run{Dir: dir, Branch: branch, Base: strings.TrimSpace(base), StartedAt: time.Now()}}, nil
 }
 
 // Review includes commits since task creation, staged and unstaged edits, and

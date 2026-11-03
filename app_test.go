@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -114,7 +115,9 @@ func (w *window) close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := w.s.Close(ctx); err != nil {
-		w.t.Error(err)
+		var stacks bytes.Buffer
+		_ = pprof.Lookup("goroutine").WriteTo(&stacks, 2)
+		w.t.Errorf("%v\n%s", err, stacks.String())
 	}
 }
 
@@ -2697,13 +2700,13 @@ func TestTaskWorkspaceFlow(t *testing.T) {
 		}
 		var remaining control.List
 		json.Unmarshal(body, &remaining)
-		present := false
+		finished := false
 		for _, s := range remaining.Spaces {
-			if s.ID == taskSpace {
-				present = true
+			if s.ID == taskSpace && s.Task != nil && s.Task.Finished && s.Task.BranchKept && s.Task.Dir == "" && s.Task.Brief == "Revised acceptance criteria" && s.Task.Check != nil {
+				finished = true
 			}
 		}
-		if !present {
+		if finished {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -2717,5 +2720,284 @@ func TestTaskWorkspaceFlow(t *testing.T) {
 	saved, err := exec.Command("git", "-C", repo, "show", space.Task.Branch+":a.txt").CombinedOutput()
 	if err != nil || string(saved) != "fixed redirect\n" {
 		t.Fatalf("finished work was not saved: %s %v", saved, err)
+	}
+	reopened.run()
+	reopened.tt.Frame()
+	if err := reopened.tt.Click("Review saved changes"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for !strings.Contains(reopened.texts(), "+fixed redirect") {
+		if time.Now().After(deadline) {
+			t.Fatalf("saved review did not load: %s", reopened.texts())
+		}
+		reopened.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := reopened.tt.Click("Integrate…"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for !strings.Contains(reopened.texts(), "Target branch:") {
+		if time.Now().After(deadline) {
+			t.Fatalf("integration preview did not load: %s", reopened.texts())
+		}
+		reopened.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	original, _ := os.ReadFile(filepath.Join(repo, "a.txt"))
+	if string(original) != "original\n" {
+		t.Fatal("preview changed checkout")
+	}
+	if err := reopened.tt.Click("Confirm integration"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		reopened.run()
+		body, err := reopened.call(control.Request{Method: "status"})
+		var status control.Status
+		if err == nil && json.Unmarshal(body, &status) == nil && status.Space != nil && status.Space.Task != nil && status.Space.Task.IntegratedCommit != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("integration did not complete: %s", reopened.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	original, _ = os.ReadFile(filepath.Join(repo, "a.txt"))
+	if string(original) != "fixed redirect\n" {
+		t.Fatalf("checkout not integrated: %s", original)
+	}
+	reopened.run()
+	reopened.tt.Frame()
+	if err := reopened.tt.Click("Start another attempt"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		reopened.run()
+		body, err := reopened.call(control.Request{Method: "status"})
+		var status control.Status
+		if err == nil && json.Unmarshal(body, &status) == nil && status.Space != nil && status.Space.Task != nil && status.Space.Task.Dir != "" && len(status.Space.Task.Runs) == 1 {
+			if status.Space.Task.Runs[0].Branch != space.Task.Branch || status.Space.Task.Branch == space.Task.Branch || status.Space.Task.Runs[0].IntegratedCommit == "" {
+				t.Fatalf("retry lost prior result: %+v", status.Space.Task)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retry did not start: %s", reopened.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	reopened.run()
+	reopened.tt.Frame()
+	if err := reopened.tt.Click("Attempt 1 · shell"); err != nil {
+		t.Fatal(err)
+	}
+	reopened.run()
+	reopened.tt.Frame()
+	if err := reopened.tt.Click("Review saved changes"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for !strings.Contains(reopened.texts(), "+fixed redirect") {
+		if time.Now().After(deadline) {
+			t.Fatalf("previous attempt could not be reviewed: %s", reopened.texts())
+		}
+		reopened.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestTaskSubmissionReceipt(t *testing.T) {
+	repo := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}, {"commit", "--allow-empty", "-m", "initial"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v", out, err)
+		}
+	}
+	root, bin := t.TempDir(), t.TempDir()
+	marker := filepath.Join(root, "received")
+	script := "#!/bin/sh\nprintf '\\033]7501;state=idle:app=fake-code\\033\\\\'\nIFS= read -r line\nprintf '%s' \"$line\" > \"$1\"\nprintf '\\033]7501;state=done:app=fake-code\\033\\\\'\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(bin, "fakeagent"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := json.Marshal(map[string]any{"fake": map[string]any{"name": "Fake Agent", "command": []string{"fakeagent", marker}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config", "agents.json"), agents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := startWindowIn(t, bin+":/usr/bin:/bin", root, kerneltest.NewStore())
+	if _, err := w.call(control.Request{Method: "do", Action: "task.new", Args: map[string]any{"name": "Fix login", "folder": repo, "agent": "custom:fake"}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(w.texts(), "Agent reports idle") {
+		if time.Now().After(deadline) {
+			t.Fatalf("agent state missing: %s", w.texts())
+		}
+		w.run()
+		w.tt.Frame()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(w.texts(), "Not sent with Send task") {
+		t.Fatal("missing unsent status")
+	}
+	if err := w.tt.Click("Send task"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		data, _ := os.ReadFile(marker)
+		if string(data) == "Fix login" && strings.Contains(w.texts(), "Submitted to terminal transport") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task not submitted: %q; %s", data, w.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	body, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status control.Status
+	if err := json.Unmarshal(body, &status); err != nil || status.Space == nil || status.Space.Task == nil || status.Space.Task.SentAt == nil || status.Space.Task.SentName != "Fix login" {
+		t.Fatalf("submission receipt missing: %s (%v)", body, err)
+	}
+	w.command("terminal.task-inbox")
+	deadline = time.Now().Add(15 * time.Second)
+	for !strings.Contains(w.texts(), "Ready to review · 1") {
+		if time.Now().After(deadline) {
+			t.Fatalf("reported result missing from inbox: %s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := w.tt.Click("Review · Fix login"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(15 * time.Second)
+	for !strings.Contains(w.texts(), "No changes from the task's starting commit.") {
+		if time.Now().After(deadline) {
+			t.Fatalf("review action did not load changes: %s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.close()
+	reopened := startWindowIn(t, bin+":/usr/bin:/bin", root, w.store)
+	body, err = reopened.call(control.Request{Method: "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spaces control.List
+	if err := json.Unmarshal(body, &spaces); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, space := range spaces.Spaces {
+		if space.Task != nil && space.Task.Name == "Fix login" && space.Task.SentAt != nil && space.Task.SentProgram == "Fake Agent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("submission receipt did not survive reopen: %s", body)
+	}
+}
+
+func TestTasksInbox(t *testing.T) {
+	repo := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}, {"commit", "--allow-empty", "-m", "initial"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v", out, err)
+		}
+	}
+	w := startWindow(t)
+	w.command("terminal.task-inbox")
+	if !strings.Contains(w.texts(), "No tasks yet") {
+		t.Fatalf("missing empty state: %s", w.texts())
+	}
+	if err := w.tt.Click("New task…"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.tt.Click("Task name"); err != nil {
+		t.Fatal(err)
+	}
+	w.tt.Type("Queued inbox task")
+	if err := w.tt.Click("Repository folder"); err != nil {
+		t.Fatal(err)
+	}
+	w.tt.Key(ui.Cmd, ui.KeyA)
+	w.tt.Type(repo)
+	if err := w.tt.Click("Add to queue"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.texts(), "QUEUED") {
+		t.Fatalf("queued task desk missing: %s", w.texts())
+	}
+	w.command("terminal.task-inbox")
+	if !strings.Contains(w.texts(), "Queued inbox task") || !strings.Contains(w.texts(), "Start…") {
+		t.Fatalf("queued task missing from inbox: %s", w.texts())
+	}
+	if err := w.tt.Click("Start… · Queued inbox task"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.texts(), "Start task") {
+		t.Fatal("queue action did not open task desk")
+	}
+	if _, err := w.call(control.Request{Method: "do", Action: "task.new", Args: map[string]any{"name": "Fix inbox", "folder": repo, "agent": "shell"}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		w.run()
+		w.tt.Frame()
+		body, err := w.call(control.Request{Method: "status"})
+		var status control.Status
+		if err == nil && json.Unmarshal(body, &status) == nil && status.Space != nil && status.Space.Task != nil && status.Space.Task.Name == "Fix inbox" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task not created: %s", w.texts())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	w.command("terminal.task-inbox")
+	if text := w.texts(); !strings.Contains(text, "Open · 1") || !strings.Contains(text, "Fix inbox") || !strings.Contains(text, repo) {
+		t.Fatalf("task missing from inbox: %s", text)
+	}
+	if err := w.tt.Click("Search tasks"); err != nil {
+		t.Fatal(err)
+	}
+	w.tt.Type("not a task")
+	if !strings.Contains(w.texts(), "No matching tasks") {
+		t.Fatalf("search did not filter: %s", w.texts())
+	}
+	w.tt.Key(ui.Cmd, ui.KeyA)
+	w.tt.Type("Fix inbox")
+	if !strings.Contains(w.texts(), "Open task") || !strings.Contains(w.texts(), "Fix inbox") {
+		t.Fatalf("matching task not shown: %s", w.texts())
+	}
+	if err := w.tt.Click("Open task · Fix inbox"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.texts(), "Send task") {
+		t.Fatalf("task desk did not open: %s", w.texts())
+	}
+	w.command("terminal.task-inbox")
+	if err := w.tt.Click("Back to workspace"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.texts(), "Send task") {
+		t.Fatal("could not return to workspace")
 	}
 }

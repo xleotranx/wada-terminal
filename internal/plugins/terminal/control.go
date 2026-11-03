@@ -37,16 +37,21 @@ func (t *Plugin) startControl() {
 		}
 		// A second worker closes the listener when the window ends, which
 		// unblocks the accept loop below.
-		scope.Spawn(func(ctx context.Context) {
+		if !scope.Spawn(func(ctx context.Context) {
 			<-ctx.Done()
 			_ = ln.Close()
-		})
+		}) {
+			_ = ln.Close()
+			return
+		}
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			scope.Spawn(func(ctx context.Context) { t.serveControl(ctx, conn) })
+			if !scope.Spawn(func(ctx context.Context) { t.serveControl(ctx, conn) }) {
+				_ = conn.Close()
+			}
 		}
 	})
 }
@@ -55,6 +60,8 @@ func (t *Plugin) startControl() {
 // and its answer comes back here, so a worker never touches the window state.
 func (t *Plugin) serveControl(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	req, err := control.ReadRequest(conn)
 	if err != nil {
 		control.WriteResponse(conn, control.Response{Error: err.Error()})
@@ -278,15 +285,28 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		if t.current == nil || t.current.task == nil {
 			return nil, fmt.Errorf("select a task workspace first")
 		}
+		if t.current.task.Dir == "" && !t.current.task.Finished {
+			return nil, fmt.Errorf("start the task first")
+		}
+		if t.current.task.Finished && !t.current.task.BranchKept {
+			return nil, fmt.Errorf("no retained task branch to review")
+		}
 		if t.current.review == nil {
 			t.current.review = &taskReview{}
 		}
+		if t.current.review.job.Running() {
+			return nil, fmt.Errorf("a review is already running")
+		}
+		t.current.review.history = 0
 		t.current.review.changesView = true
 		t.reviewTask(t.current)
 		return map[string]any{"started": true}, nil
 	case "task.check":
 		if t.current == nil || t.current.task == nil {
 			return nil, fmt.Errorf("select a task workspace first")
+		}
+		if t.current.task.Dir == "" {
+			return nil, fmt.Errorf("start the task first")
 		}
 		if t.current.finishing {
 			return nil, fmt.Errorf("task is finishing")
@@ -347,6 +367,7 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		t.taskInboxOpen = false
 		t.current = w
 		if w.focus == nil {
 			if tb := w.currentTab(); tb != nil {

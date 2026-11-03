@@ -55,11 +55,14 @@ type workspace struct {
 // Plugin is the terminal: its workspaces, their tabs, and the programs their
 // panes run.
 type Plugin struct {
-	finishUI finishTaskUI
-	tasksUI  taskUI
-	ctx      *kernel.Context
-	host     shell.Host
-	services ui.Services
+	taskInboxOpen  bool
+	taskInboxQuery string
+	finishUI       finishTaskUI
+	integrateUI    integrationUI
+	tasksUI        taskUI
+	ctx            *kernel.Context
+	host           shell.Host
+	services       ui.Services
 
 	sidebar        *kernel.Setting[bool]
 	font           *kernel.Setting[float64]
@@ -197,6 +200,7 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 	kernel.Contribute(c, shell.Overlays, "terminal.tasks", 15, shell.View{Render: t.taskDialog})
 	kernel.Contribute(c, shell.Overlays, "terminal.task-brief", 16, shell.View{Render: t.taskBriefDialog})
 	kernel.Contribute(c, shell.Overlays, "terminal.finish-task", 20, shell.View{Render: t.finishTaskDialog})
+	kernel.Contribute(c, shell.Overlays, "terminal.integrate-task", 21, shell.View{Render: t.integrationDialog})
 	t.agentWake = make(chan struct{}, 1)
 	t.modAnimatedWake = make(chan struct{}, 1)
 	t.ctx.Spawn(func(ctx context.Context) { t.watchAgents(ctx) })
@@ -212,6 +216,9 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 	if os.Getenv("WADATERM_INDEX") != "" {
 		// A capture can show the index without opening it by hand.
 		t.openIndex()
+	}
+	if os.Getenv("WADATERM_TASKS") != "" {
+		t.openTaskInbox()
 	}
 	if os.Getenv("WADATERM_WORKSPACES") != "" {
 		// A capture can show the workspace menu open.
@@ -318,6 +325,7 @@ func (t *Plugin) commandSpecs() []commandSpec {
 		{"copy", 30, "Copy Selection", "", []string{"cmd+shift+c"}, t.copySelection},
 		{"select-all", 31, "Select All", "", []string{"cmd+shift+a"}, t.selectAll},
 		{"sidebar", 40, "Toggle Sidebar", "View", []string{"cmd+b"}, t.toggleSidebar},
+		{"task-inbox", 39, "Tasks", "View", []string{"cmd+shift+j"}, t.openTaskInbox},
 		{"font-larger", 41, "Larger Text", "View", []string{"cmd+="}, func() { t.zoomFont(1) }},
 		{"font-smaller", 42, "Smaller Text", "View", []string{"cmd+-"}, func() { t.zoomFont(-1) }},
 		{"font-reset", 43, "Actual Size", "View", []string{"cmd+0"}, func() { t.setFont(12.5) }},
@@ -418,6 +426,7 @@ func (t *Plugin) seedDemo() {
 	w.selectTab(0)
 	t.workspaces = append(t.workspaces, w)
 	t.current = w
+	t.taskInboxOpen = false
 	if home := homeDir(); home != "" && home != dir {
 		t.addWorkspace(filepath.Base(home), home)
 		t.current = w
@@ -455,6 +464,7 @@ func (t *Plugin) addWorkspaceOn(name, dir, machine string) *workspace {
 	w.addTab(s, true)
 	t.workspaces = append(t.workspaces, w)
 	t.current = w
+	t.taskInboxOpen = false
 	if err != nil {
 		t.host.Toast(ui.Toast{Title: "Machine " + machine, Description: err.Error(),
 			Type: components.ToastError})
@@ -583,6 +593,7 @@ func (t *Plugin) stepWorkspace(delta int) {
 	}
 	idx = (idx + delta + len(t.workspaces)) % len(t.workspaces)
 	t.current = t.workspaces[idx]
+	t.taskInboxOpen = false
 	t.workspaceMenu = false
 	if t.current.focus == nil {
 		if tb := t.current.currentTab(); tb != nil {
@@ -639,9 +650,10 @@ func (w *workspace) sessions(out []*session) []*session {
 // newTab opens a session of kind k in a new tab of the workspace on show.
 func (t *Plugin) newTab(k kind) {
 	w := t.current
-	if w == nil {
+	if w == nil || (w.task != nil && w.task.Dir == "") {
 		return
 	}
+	t.taskInboxOpen = false
 	cols, rows := t.defaultSize()
 	s := t.startAt(w.machine, w.client, k, w.dir, cols, rows)
 	w.addTab(s, true)
@@ -698,6 +710,7 @@ func (t *Plugin) focusOn(s *session) {
 	for _, w := range t.workspaces {
 		for i, tb := range w.tabs {
 			if tb.root.contains(s) {
+				t.taskInboxOpen = false
 				t.current = w
 				w.active = i
 				tb.focus = s

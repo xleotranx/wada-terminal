@@ -97,6 +97,37 @@ func TestCloseEndsRead(t *testing.T) {
 	}
 }
 
+func TestCloseEndsInProgressWait(t *testing.T) {
+	s, err := Start(Options{Argv: []string{"/bin/sleep", "30"}, Env: os.Environ(), Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.cmd.Process.Kill() })
+	done := make(chan error, 1)
+	go func() { done <- s.Wait() }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.mu.Lock()
+		waiting := s.waited
+		s.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Wait did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not end the running process while Wait was in progress")
+	}
+}
+
 func findShell(t *testing.T) string {
 	t.Helper()
 	for _, sh := range []string{"/bin/zsh", "/bin/bash", "/bin/sh"} {

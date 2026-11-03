@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"path/filepath"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/xleotranx/wada-kit/kernel"
@@ -20,12 +21,18 @@ type finishTaskUI struct {
 }
 
 func (t *Plugin) openFinishTask(w *workspace) {
+	if w == nil || w.finishing {
+		return
+	}
 	f := &t.finishUI
 	if f.job.Running() {
 		f.open = true
 		return
 	}
 	*f = finishTaskUI{open: true, workspace: w}
+	if w.task != nil && w.task.Dir == "" {
+		return
+	}
 	t.loadFinishTask()
 }
 func (t *Plugin) loadFinishTask() {
@@ -90,8 +97,18 @@ func (t *Plugin) finishTask() {
 			return
 		}
 		f.open = false
-		t.dropWorkspace(w)
-		description := "Task and temporary folder removed."
+		w.tabs = nil
+		w.focus = nil
+		w.active = 0
+		w.dir = task.Repo
+		w.task.Dir = ""
+		w.task.Finished = true
+		w.task.FinishedAt = time.Now()
+		w.task.BranchKept = result.BranchKept
+		w.task.Discarded = !save
+		w.review = nil
+		t.saveWorkspaces()
+		description := "Temporary folder removed. The task remains in Tasks."
 		if result.BranchKept {
 			description += " Saved commits remain on " + task.Branch + "."
 		} else {
@@ -110,7 +127,19 @@ func (t *Plugin) finishTaskDialog(c *ui.Context) {
 			return
 		}
 		ui.Text(c, f.workspace.task.Name).FontSize(14).Bold().TextColor(pal.Text)
-		ui.Text(c, "This stops the task's terminals and removes its temporary folder and sidebar entry.").FontSize(12).TextColor(pal.Muted)
+		if f.workspace.task.Dir == "" {
+			message := "Remove this queued task? No workspace has been created."
+			if f.workspace.task.Finished {
+				message = "Remove this task record? Any retained branch will remain in the repository."
+			}
+			ui.Text(c, message).FontSize(12).TextColor(pal.Muted)
+			ui.Row(c).Gap(8).Children(func() {
+				ui.Button(c, "Cancel").OnClick(func() { f.open = false })
+				ui.PrimaryButton(c, "Remove task").OnClick(func() { f.open = false; t.dropWorkspace(f.workspace) })
+			})
+			return
+		}
+		ui.Text(c, "This stops the task's terminals and removes its temporary folder. The task record remains.").FontSize(12).TextColor(pal.Muted)
 		ui.Text(c, "Changed files are saved as a commit on the task branch. Unmerged commits stay there for recovery; your original project is unchanged.").FontSize(12).TextColor(pal.Muted)
 		if f.job.Running() {
 			ui.Text(c, "Checking files or finishing task…").TextColor(pal.Muted)
@@ -122,7 +151,7 @@ func (t *Plugin) finishTaskDialog(c *ui.Context) {
 		if f.loaded {
 			label := "No unsaved changes."
 			if f.plan.Missing {
-				label = "The temporary folder is already gone. Finish removes the remaining task entry; saved commits are kept."
+				label = "The temporary folder is already gone. The task record and branch are retained."
 			}
 			if f.plan.Dirty {
 				label = "Unsaved changes will be saved before cleanup."

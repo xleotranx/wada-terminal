@@ -308,21 +308,33 @@ The pseudo-terminal tests open `/dev/ptmx`, which a restricted sandbox may deny.
 
 ## Task workspaces
 
-`New task…` in the sidebar or File menu (`⌘⇧T`) creates a named task from a
-local Git repository. Choose a built-in agent, a program from `agents.json` or
-`programs.json`, or a shell. Wada creates a new branch and worktree from
-committed HEAD under its data folder's `tasks/` directory. Uncommitted source
-changes are left in their original checkout. A repository needs a commit;
+`New task…` in the sidebar or File menu (`⌘⇧T`) adds a named task to the
+queue without creating a worktree. Choose a local repository and a built-in
+agent, a program from `agents.json` or `programs.json`, or a shell. Select the
+queued task and click `Start task` to create a new branch and worktree from
+the then-current committed HEAD under the data folder's `tasks/` directory.
+Uncommitted source changes are left in their original checkout. A repository needs a commit;
 remote task creation is not supported yet.
 
 Add an optional brief with context, constraints, and acceptance criteria when
-creating a task; `Task brief…` lets you review or edit it later. Tasks in the
-same repository appear together in the sidebar. Their terminals,
+creating a task; `Task brief…` lets you review or edit it later. Open **Tasks**
+from the sidebar or View menu (`⌘⇧J`) to see and search tasks across repositories.
+The view groups them by **Needs you**, **Ready to review**, **Working**, **Queued**,
+**Open**, and **Finished**. Each action opens the appropriate task or terminal;
+`Start…` opens the queued task so you can choose a program before starting.
+`Back to workspace` returns to the current workspace. Their terminals,
 splits, task name, branch, starting commit and last check survive reopening the
 window. The brief is saved with the task. `Terminal` returns to the agent;
 `Send task` submits the task name and brief as a prompt when the focused agent is
-ready. Briefs require the agent to enable bracketed paste, so their line breaks
-cannot submit partial prompts. This action is disabled for ordinary shells.
+ready. The task view identifies the started program and selected terminal,
+shows an explicit agent status report when available, and otherwise says
+readiness is unknown. Bracketed paste does not prove an agent is ready. After a
+successful input write, Wada records when and where it submitted the task to the
+terminal transport; this does not confirm the agent received or accepted it.
+The receipt is kept with the attempt, and changes to the brief after submission
+are shown. `Send task again` explicitly resubmits the current task. Briefs
+require the agent to enable bracketed paste, so their line breaks cannot submit
+partial prompts. This action is disabled for ordinary shells.
 Agent startup uses the agent's existing authentication and configuration.
 
 `Changes` reviews the task against its starting commit, including later commits,
@@ -339,12 +351,30 @@ shows its command, timestamp, actual exit code and output. The default is
 `Not run`. A changed review snapshot marks an old check as unverified. Checks do
 not automatically merge, commit, approve agent commands, or declare a task done.
 `Finish task…` saves ordinary changed files as a commit on the task branch,
-stops its terminals, and removes its temporary folder and sidebar entry. If
-there is nothing to save, use `Finish task`. You can explicitly choose to discard
+stops its terminals, and removes its temporary folder. The finished task remains
+in Tasks with its brief, branch, and last check receipt. If the branch is
+retained, `Review saved changes` shows its committed diff against the starting
+commit. The receipt predates cleanup and is not proof that the retained branch
+was checked. Removing the task record does not remove a retained branch.
+
+If you need another approach, select a program and choose `Start another attempt`.
+Wada creates a fresh worktree from the original checkout's current committed
+HEAD, then keeps the earlier attempt, its brief, branch, check receipt, and
+integration receipt under `ATTEMPTS`. Select an earlier attempt to review or
+integrate its retained branch. The task brief can be edited for the next attempt;
+the earlier attempt keeps the brief it started with. Attempts start one at a
+time, and the current workspace must be finished before starting another.
+If there is nothing to save, use `Finish task`. You can explicitly choose to discard
 unsaved changes instead. Ignored local files are listed and need a separate
 acknowledgment because Git does not save them. Unmerged commits keep their branch
 for recovery; branches already merged into the original checkout are removed.
-The original project is unchanged; applying a task branch remains separate.
+The original project is unchanged by finishing. To apply a retained branch,
+choose `Integrate…` on the finished task. The preview shows the original
+checkout, target branch and exact commits; confirming fast-forwards the target
+and keeps the task branch. Wada requires a clean checkout and rechecks the
+preview before applying it. Ignored files are protected from overwrite. If
+the branches have diverged, merge manually and resolve any conflicts. The
+integration receipt records what was applied; it is not a live branch status.
 Cancel leaves files and terminals alone. A failed save or cleanup retains the task
 and explains the problem. Closing a task from its menu opens the same finish
 dialog. Closing only the window keeps core-owned terminals running.
