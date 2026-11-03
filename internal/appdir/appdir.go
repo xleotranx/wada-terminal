@@ -6,6 +6,7 @@ package appdir
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/egoist/mygo"
 )
@@ -27,4 +28,33 @@ func Dir(folder, env string) (string, error) {
 		folder += "-dev"
 	}
 	return filepath.Join(dir, folder), nil
+}
+
+// TerminalEnv routes commands back to the terminal's environment without
+// making a newly launched app inherit this window's folder or MyGo mode.
+func TerminalEnv(env []string, dir string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "WADATERM_DATA_DIR=") || strings.HasPrefix(entry, "WADATERM_CONTEXT_DATA_DIR=") || strings.HasPrefix(entry, "MYGO_ENV=") {
+			continue
+		}
+		out = append(out, entry)
+	}
+	if dir != "" {
+		if absolute, err := filepath.Abs(dir); err == nil {
+			dir = absolute
+		}
+		out = append(out, "WADATERM_CONTEXT_DATA_DIR="+dir)
+	}
+	return out
+}
+
+// UseTerminalContext selects the invoking terminal's data for CLI commands.
+// An explicit override still wins. Windows and cores do not call this.
+func UseTerminalContext() {
+	if os.Getenv("WADATERM_DATA_DIR") == "" {
+		if dir := os.Getenv("WADATERM_CONTEXT_DATA_DIR"); dir != "" {
+			_ = os.Setenv("WADATERM_DATA_DIR", dir)
+		}
+	}
 }

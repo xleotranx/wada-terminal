@@ -55,6 +55,10 @@ func Listen(dir string) (*Server, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("core: no data folder")
 	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -207,7 +211,7 @@ func (s *Server) dispatch(req Request) Response {
 		s.nextID++
 		id := s.nextID
 		s.mu.Unlock()
-		t, err := startTerminal(id, *req.Start, s.exitNote, s.terminalEvent)
+		t, err := startTerminal(id, *req.Start, s.dir, s.exitNote, s.terminalEvent)
 		if err != nil {
 			return Response{Error: err.Error()}
 		}

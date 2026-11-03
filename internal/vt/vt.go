@@ -269,6 +269,9 @@ func (s *Screen) Bell() bool {
 // full-screen program does.
 func (s *Screen) Alternate() bool { return s.alternate }
 
+// BracketedPaste reports whether the program accepts bracketed paste input.
+func (s *Screen) BracketedPaste() bool { return s.bracketPaste }
+
 // History is how many lines scrolled off the top of the main screen.
 func (s *Screen) History() int { return len(s.history) }
 

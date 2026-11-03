@@ -195,6 +195,7 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 		shell.View{Render: t.sessions})
 
 	kernel.Contribute(c, shell.Overlays, "terminal.tasks", 15, shell.View{Render: t.taskDialog})
+	kernel.Contribute(c, shell.Overlays, "terminal.task-brief", 16, shell.View{Render: t.taskBriefDialog})
 	kernel.Contribute(c, shell.Overlays, "terminal.finish-task", 20, shell.View{Render: t.finishTaskDialog})
 	t.agentWake = make(chan struct{}, 1)
 	t.modAnimatedWake = make(chan struct{}, 1)

@@ -258,12 +258,13 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 
 	case "task.new":
 		name, _ := control.String(args, "name")
+		brief, _ := control.String(args, "brief")
 		folder, _ := control.String(args, "folder")
 		agent, _ := control.String(args, "agent")
 		if agent == "" {
 			agent = "shell"
 		}
-		if err := t.createTask(name, folder, agent); err != nil {
+		if err := t.createTask(name, brief, folder, agent); err != nil {
 			return nil, err
 		}
 		return map[string]any{"started": true}, nil

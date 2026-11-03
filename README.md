@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/icon.png" width="112" alt="Wada Terminal's icon"></p>
+
 # Wada Terminal
 
 A native terminal for coding agents, built with Go, [MyGo](https://mygo.egoist.dev)
@@ -17,10 +19,30 @@ Install the Go version in [go.mod](go.mod); the first run needs network access t
 download Go modules and MyGo's native libraries.
 
 ```sh
-go run .
+make run
 ```
 
-`go tool mygo dev .` runs it with live reload. The app depends on the tagged
+`make run` and `go run .` run the development app; `go tool mygo dev .` adds
+live reload. `make build-dev` writes a development executable to
+`dist/dev/wada-terminal`, and `make build` writes a production executable to
+`dist/prod/wada-terminal`. `go tool mygo build` packages a production app in
+`dist`; `go tool mygo dev .` keeps its separate development app in `.mygo/dev`.
+
+Development and production use independent data, settings, tasks, sockets and
+cores. On macOS their default folders are
+`~/Library/Application Support/wada-terminal-dev` and
+`~/Library/Application Support/wada-terminal`, respectively. Existing data
+stays in its current folder. The `wada-terminal` CLI run inside a pane targets
+that pane's environment, while launching another window chooses its own default.
+Use the current `wada-terminal` CLI in the pane; older CLI builds do not know
+how to select the pane's environment.
+`WADATERM_DATA_DIR` explicitly selects a data folder for either environment;
+using the same override for both makes them share it. `WADATERM_CONFIG_DIR`
+separately overrides the interface files. `MYGO_ENV=production` makes an
+ordinary Go development executable use production defaults; packaged production
+builds always use production defaults.
+
+The app depends on the tagged
 [wada-kit](https://github.com/xleotranx/wada-kit) release in `go.mod`. To change
 the kit and the app together, put both checkouts beside each other and make a
 local workspace, which `GOWORK=off go build ./...` then ignores:
@@ -28,6 +50,10 @@ local workspace, which `GOWORK=off go build ./...` then ignores:
 ```sh
 go work init . ../wada-kit
 ```
+
+`go tool mygo build` packages the app with the icon in `resources/icon.png`; a
+development build takes `resources/icon-dev.png`. Both are rendered from the
+sources in [design](design/).
 
 Sessions start in your home folder. `claude`, `codex` and `opencode` are started
 when they are installed; a pane whose agent is missing runs your login shell
@@ -289,11 +315,15 @@ committed HEAD under its data folder's `tasks/` directory. Uncommitted source
 changes are left in their original checkout. A repository needs a commit;
 remote task creation is not supported yet.
 
-Tasks in the same repository appear together in the sidebar. Their terminals,
+Add an optional brief with context, constraints, and acceptance criteria when
+creating a task; `Task brief…` lets you review or edit it later. Tasks in the
+same repository appear together in the sidebar. Their terminals,
 splits, task name, branch, starting commit and last check survive reopening the
-window. `Terminal` returns to the agent; `Send task` submits the task name as a
-prompt when the focused agent is ready. This action is disabled for ordinary
-shells. Agent startup uses the agent's existing authentication and configuration.
+window. The brief is saved with the task. `Terminal` returns to the agent;
+`Send task` submits the task name and brief as a prompt when the focused agent is
+ready. Briefs require the agent to enable bracketed paste, so their line breaks
+cannot submit partial prompts. This action is disabled for ordinary shells.
+Agent startup uses the agent's existing authentication and configuration.
 
 `Changes` reviews the task against its starting commit, including later commits,
 staged and unstaged edits and untracked text files. It refreshes every two seconds
@@ -323,7 +353,7 @@ After a lost core, restored panes are fresh shells, as with ordinary workspaces.
 The window API also accepts asynchronous task actions:
 
 ```sh
-wada-terminal do task.new --name "Fix login redirect" --folder /path/to/repo --agent opencode
+wada-terminal do task.new --name "Fix login redirect" --brief "Keep sessions and add a regression test" --folder /path/to/repo --agent opencode
 wada-terminal ls
 wada-terminal do task.review
 wada-terminal do task.finish  # opens confirmation in the app; does not delete by itself

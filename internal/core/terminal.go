@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"wada-terminal/internal/appdir"
 	"wada-terminal/internal/pty"
 	"wada-terminal/internal/vt"
 )
@@ -96,7 +97,7 @@ type terminal struct {
 }
 
 // startTerminal runs a program and returns the terminal that holds it.
-func startTerminal(id int, start Start, onExit func(*terminal, Exit), onEvent func(*terminal, string)) (*terminal, error) {
+func startTerminal(id int, start Start, dataDir string, onExit func(*terminal, Exit), onEvent func(*terminal, string)) (*terminal, error) {
 	if len(start.Argv) == 0 {
 		return nil, errors.New("no program to run")
 	}
@@ -109,7 +110,7 @@ func startTerminal(id int, start Start, onExit func(*terminal, Exit), onEvent fu
 	screen := vt.New(start.Cols, start.Rows)
 	screen.SetColors(start.FgRGB, start.BgRGB)
 	proc, err := pty.Start(pty.Options{
-		Argv: start.Argv, Env: terminalEnv(start.Dir, start.Dark, id, start.Parent), Dir: start.Dir,
+		Argv: start.Argv, Env: terminalEnv(start.Dir, dataDir, start.Dark, id, start.Parent), Dir: start.Dir,
 		Cols: start.Cols, Rows: start.Rows,
 	})
 	if err != nil {
@@ -126,12 +127,12 @@ func startTerminal(id int, start Start, onExit func(*terminal, Exit), onEvent fu
 
 // terminalEnv is what a program reads to know it draws into a terminal: the
 // app's environment with TERM, truecolor and the light or dark background.
-func terminalEnv(dir string, dark bool, id, parent int) []string {
+func terminalEnv(dir, dataDir string, dark bool, id, parent int) []string {
 	fg, bg := "15", "0"
 	if !dark {
 		fg, bg = "0", "15"
 	}
-	env := os.Environ()
+	env := appdir.TerminalEnv(os.Environ(), dataDir)
 	env = append(env, "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=wada-terminal",
 		"COLORFGBG="+fg+";"+bg, "WADA_TERMINAL_ID="+address(id))
 	if parent > 0 {

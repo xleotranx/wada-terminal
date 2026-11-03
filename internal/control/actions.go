@@ -29,6 +29,7 @@ var Actions = []Action{
 	{Name: "task.finish", Description: "Open the Finish task confirmation; only the person can confirm saving or discarding and cleanup."},
 	{Name: "task.new", Description: "Create a local isolated task asynchronously. Inspect status/ls for the resulting space; creation errors open the task dialog.", Args: []Arg{
 		{Name: "name", Type: "string", Required: true, Description: "Task name."},
+		{Name: "brief", Type: "string", Description: "Optional task context and acceptance criteria."},
 		{Name: "folder", Type: "string", Required: true, Description: "Local Git repository."},
 		{Name: "agent", Type: "string", Description: "shell (default), claude, codex, opencode or custom:ID."}}},
 	{Name: "task.review", Description: "Show and refresh the current task's changes."},

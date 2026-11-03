@@ -1,12 +1,15 @@
 APP := wada-terminal
 
-.PHONY: run build test vet check fmt
+.PHONY: run build build-dev test vet check fmt
 
 run:
-	go run .
+	MYGO_ENV=development go run .
 
 build:
-	go build -o $(APP) .
+	go build -ldflags '-X github.com/egoist/mygo.production=1' -o dist/prod/$(APP) .
+
+build-dev:
+	go build -o dist/dev/$(APP) .
 
 test:
 	go test ./...

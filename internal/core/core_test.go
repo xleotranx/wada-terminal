@@ -401,6 +401,29 @@ func TestCoreGivesATerminalItsAddress(t *testing.T) {
 	}
 }
 
+func TestTerminalUsesItsCoreDataDirectory(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	t.Setenv("WADATERM_DATA_DIR", "/wrong/inherited/directory")
+	first, firstClient := testCore(t)
+	second, secondClient := testCore(t)
+	for _, tc := range []struct {
+		server *Server
+		client *Client
+	}{{first, firstClient}, {second, secondClient}} {
+		rec, err := tc.client.Start(Start{Argv: []string{"/bin/sh", "-c", `printf '%s\n%s\n' "$WADATERM_CONTEXT_DATA_DIR" "${WADATERM_DATA_DIR:-no-override}"`}, Cols: 200, Rows: 5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the program to print its own core data directory", func() bool {
+			read, err := tc.client.Read(rec.ID, 10)
+			text := strings.Join(read.Lines, "\n")
+			return err == nil && strings.Contains(text, tc.server.dir) && strings.Contains(text, "no-override")
+		})
+	}
+}
+
 // TestChildExitNoteReachesParent checks the small helper channel: a child that
 // asked to notify types a tagged note into the terminal that started it.
 func TestChildExitNoteReachesParent(t *testing.T) {

@@ -37,6 +37,8 @@ Onevra components. macOS is the tested platform. This repository is one module,
   of the lines that wrapped, and re-wraps them on a resize (`reflow.go`); no
   UI, no I/O.
 - `internal/pty`: a program on a pseudo-terminal. Starts no goroutine.
+- `design/`: the app icon's SVG sources; `resources/icon.png` and
+  `resources/icon-dev.png` are the packaged renders MyGo picks up.
 
 ## Rules
 

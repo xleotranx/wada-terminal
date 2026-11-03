@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <!-- Wada Terminal's app icon. A W drawn in one stroke, its last stroke alive:
+       the brand, and an agent still typing. The source renders at
+       1024x1024 with a 1024 canvas and an 824 squircle, the macOS app-icon
+       template. Keep icon.png and icon-dev.png beside this file in sync. -->
+  <title id="title">Wada Terminal</title>
+  <desc id="desc">A warm graphite app icon with a W whose last stroke glows mint, like an agent still typing.</desc>
+
+  <defs>
+    <!-- The squircle's material: warm graphite, lit from the top left. -->
+    <linearGradient id="surface" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0" stop-color="#2d2b26"/>
+      <stop offset="0.52" stop-color="#171714"/>
+      <stop offset="1" stop-color="#0a0a0b"/>
+    </linearGradient>
+    <radialGradient id="lamp" cx="0.32" cy="0.18" r="0.75">
+      <stop offset="0" stop-color="#fff6e6" stop-opacity="0.08"/>
+      <stop offset="0.6" stop-color="#fff6e6" stop-opacity="0.02"/>
+      <stop offset="1" stop-color="#fff6e6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="floor" cx="0.5" cy="0.95" r="0.8">
+      <stop offset="0" stop-color="#000" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="live-wash" cx="0.68" cy="0.52" r="0.5">
+      <stop offset="0" stop-color="#8fe5af" stop-opacity="0.05"/>
+      <stop offset="0.55" stop-color="#8fe5af" stop-opacity="0.0175"/>
+      <stop offset="1" stop-color="#8fe5af" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- The letter: warm ivory, and the live stroke in jade. -->
+    <linearGradient id="ivory" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0" stop-color="#fffdf6"/>
+      <stop offset="0.55" stop-color="#f1ece0"/>
+      <stop offset="1" stop-color="#c9c2b2"/>
+    </linearGradient>
+    <linearGradient id="mint" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0" stop-color="#c9f4d8"/>
+      <stop offset="0.45" stop-color="#7bd3a1"/>
+      <stop offset="1" stop-color="#3d956a"/>
+    </linearGradient>
+
+    <!-- A hairline of light on the rim. -->
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
+      <stop offset="0.5" stop-color="#fff" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0.16"/>
+    </linearGradient>
+
+
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="186"/>
+    </clipPath>
+
+    <filter id="icon-shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000" flood-opacity="0.35"/>
+      <feDropShadow dx="0" dy="26" stdDeviation="28" flood-color="#000" flood-opacity="0.32"/>
+    </filter>
+    <filter id="mark-shadow" x="-40%" y="-40%" width="180%" height="190%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="live-shadow" x="-60%" y="-40%" width="220%" height="200%">
+      <feDropShadow dx="0" dy="9" stdDeviation="11" flood-color="#000" flood-opacity="0.30"/>
+    </filter>
+    <filter id="live-bloom" x="-120%" y="-60%" width="340%" height="220%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#icon-shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#surface)"/>
+  </g>
+
+  <g clip-path="url(#squircle)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#lamp)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#floor)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#live-wash)"/>
+
+    <!-- W: down, up to the middle peak, down, up to the right shoulder. -->
+    <g filter="url(#mark-shadow)">
+      <path d="M292 300 L382 700 L512 468 L642 700 L732 300" fill="none"
+            stroke="url(#ivory)" stroke-width="94" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+
+    <!-- The last stroke is live: a soft bloom and a crisp jade edge over it. -->
+    <path d="M642 700 L732 300" fill="none" stroke="url(#mint)" stroke-width="116"
+          stroke-linecap="round" stroke-linejoin="round" filter="url(#live-bloom)" opacity="0.26"/>
+    <path d="M642 700 L732 300" fill="none" stroke="url(#mint)" stroke-width="94"
+          stroke-linecap="round" stroke-linejoin="round" filter="url(#live-shadow)"/>
+
+    <rect x="102" y="102" width="820" height="820" rx="184" fill="none"
+          stroke="url(#rim)" stroke-width="2.5"/>
+  </g>
+</svg>

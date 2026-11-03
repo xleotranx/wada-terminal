@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/egoist/mygo"
+	"wada-terminal/internal/appdir"
 )
 
 // Folder is the app's folder in the user's config directory. It matches the
@@ -32,18 +32,7 @@ func Dir() (string, error) {
 	if dir := os.Getenv(EnvDir); dir != "" {
 		return dir, nil
 	}
-	if dir := os.Getenv("WADATERM_DATA_DIR"); dir != "" {
-		return dir, nil
-	}
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	folder := Folder
-	if mygo.IsDev() {
-		folder += "-dev"
-	}
-	return filepath.Join(base, folder), nil
+	return appdir.Dir(Folder, "WADATERM")
 }
 
 // AGENTS is written into the config folder on every start. Edits to it are

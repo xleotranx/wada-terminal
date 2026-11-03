@@ -23,6 +23,7 @@ import (
 type Task struct {
 	Ready  bool   `json:"ready,omitempty"`
 	Name   string `json:"name"`
+	Brief  string `json:"brief,omitempty"`
 	Repo   string `json:"repo"`
 	Dir    string `json:"dir"`
 	Branch string `json:"branch"`

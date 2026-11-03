@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode"
 
+	"wada-terminal/internal/appdir"
 	"wada-terminal/internal/config"
 	"wada-terminal/internal/core"
 	"wada-terminal/internal/pty"
@@ -191,7 +192,7 @@ func (t *Plugin) startProgram(def config.Agent, id, machine string, client *core
 		}
 		return s
 	}
-	proc, err := pty.Start(pty.Options{Argv: def.Command, Env: terminalEnv(dir, t.dark()), Dir: dir,
+	proc, err := pty.Start(pty.Options{Argv: def.Command, Env: terminalEnv(dir, t.host.DataDir(), t.dark()), Dir: dir,
 		Cols: max(cols, 2), Rows: max(rows, 2)})
 	if err != nil {
 		s.alive = false
@@ -256,7 +257,7 @@ func (t *Plugin) startAt(machine string, client *core.Client, k kind, dir string
 		}
 		return s
 	}
-	proc, err := pty.Start(pty.Options{Argv: argv, Env: terminalEnv(dir, t.dark()), Dir: dir, Cols: max(cols, 2), Rows: max(rows, 2)})
+	proc, err := pty.Start(pty.Options{Argv: argv, Env: terminalEnv(dir, t.host.DataDir(), t.dark()), Dir: dir, Cols: max(cols, 2), Rows: max(rows, 2)})
 	if err != nil {
 		s.alive = false
 		s.status = err.Error()
@@ -298,12 +299,12 @@ func shellCommand() []string {
 // terminalEnv is the environment of every session: the app's own, with what a
 // program reads to know it draws into a terminal, and whether that terminal is
 // dark, which COLORFGBG spells as foreground and background indexes.
-func terminalEnv(dir string, dark bool) []string {
+func terminalEnv(dir, dataDir string, dark bool) []string {
 	fg, bg := "15", "0"
 	if !dark {
 		fg, bg = "0", "15"
 	}
-	env := os.Environ()
+	env := appdir.TerminalEnv(os.Environ(), dataDir)
 	env = append(env, "TERM=xterm-256color", "COLORTERM=truecolor", "TERM_PROGRAM=wada-terminal",
 		"COLORFGBG="+fg+";"+bg)
 	if dir != "" {

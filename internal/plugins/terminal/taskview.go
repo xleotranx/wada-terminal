@@ -14,13 +14,15 @@ func (t *Plugin) taskDialog(c *ui.Context) {
 		ui.Text(c, "New task").FontSize(20).Bold().TextColor(pal.Text)
 		ui.Text(c, "Start from committed HEAD in an isolated Git worktree.").FontSize(12).TextColor(pal.Muted)
 		ui.Text(c, "Task name").TextColor(pal.Text)
-		ui.TextInput(c, &t.tasksUI.name).FillWidth()
+		ui.TextInput(c, &t.tasksUI.name).Label("Task name").FillWidth()
+		ui.Text(c, "Brief (optional)").TextColor(pal.Text)
+		ui.TextArea(c, &t.tasksUI.brief).Label("Task brief").Placeholder("Context, constraints, and what done looks like").Lines(3, 5).FillWidth()
 		ui.Text(c, "Local repository").TextColor(pal.Text)
 		ui.TextInput(c, &t.tasksUI.repo).FillWidth()
 		ui.Text(c, "Agent").TextColor(pal.Text)
 		labels, ids := t.taskAgents()
 		ui.Select(c, &t.tasksUI.agent, labels).FillWidth()
-		ui.Text(c, "When the agent is ready, use Send task to submit the name as its prompt.").FontSize(11).TextColor(pal.Muted)
+		ui.Text(c, "When the agent is ready, use Send task to submit the name and brief.").FontSize(11).TextColor(pal.Muted)
 		if t.tasksUI.problem != "" {
 			ui.Text(c, t.tasksUI.problem).FontSize(12).TextColor(pal.Waiting)
 		}
@@ -33,9 +35,35 @@ func (t *Plugin) taskDialog(c *ui.Context) {
 				t.tasksUI.open = false
 			})
 			ui.PrimaryButton(c, "Create task").OnClick(func() {
-				if err := t.createTask(t.tasksUI.name, t.tasksUI.repo, ids[t.tasksUI.agent]); err != nil {
+				if err := t.createTask(t.tasksUI.name, t.tasksUI.brief, t.tasksUI.repo, ids[t.tasksUI.agent]); err != nil {
 					t.tasksUI.problem = err.Error()
 				}
+			})
+		})
+	})
+}
+
+func (t *Plugin) taskBriefDialog(c *ui.Context) {
+	native.Dialog(c, &t.tasksUI.editOpen, 560, "Task brief", func() {
+		pal := chromeFor(c).pal
+		ui.Text(c, "Task brief").FontSize(20).Bold().TextColor(pal.Text)
+		ui.Text(c, "Capture context, constraints, and what done looks like.").FontSize(12).TextColor(pal.Muted)
+		ui.TextArea(c, &t.tasksUI.editBrief).Label("Brief editor").Lines(5, 10).FillWidth()
+		if t.tasksUI.editProblem != "" {
+			ui.Text(c, t.tasksUI.editProblem).TextColor(pal.Waiting)
+		}
+		ui.Row(c).Gap(8).Children(func() {
+			ui.Button(c, "Cancel").OnClick(func() { t.tasksUI.editOpen = false })
+			ui.PrimaryButton(c, "Save brief").OnClick(func() {
+				if err := validateTaskBrief(t.tasksUI.editBrief); err != nil {
+					t.tasksUI.editProblem = err.Error()
+					return
+				}
+				if w := t.tasksUI.editTask; w != nil && w.task != nil {
+					w.task.Brief = t.tasksUI.editBrief
+					t.saveWorkspaces()
+				}
+				t.tasksUI.editOpen = false
 			})
 		})
 	})
@@ -60,6 +88,12 @@ func (t *Plugin) taskContent(c *ui.Context, ch chrome, w *workspace) ui.Element 
 			ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
 				taskViewButton(c, "Terminal", !r.changesView).OnClick(func() { r.changesView = false })
 				taskViewButton(c, "Changes", r.changesView).OnClick(func() { r.changesView = true; t.reviewTask(w) })
+				ui.Button(c, "Task brief…").OnClick(func() {
+					t.tasksUI.editTask = w
+					t.tasksUI.editBrief = w.task.Brief
+					t.tasksUI.editProblem = ""
+					t.tasksUI.editOpen = true
+				})
 				ui.Box(c).Grow(1)
 				ui.Button(c, "Finish task…").Disabled(w.finishing).OnClick(func() { t.openFinishTask(w) })
 			})
@@ -68,12 +102,21 @@ func (t *Plugin) taskContent(c *ui.Context, ch chrome, w *workspace) ui.Element 
 			} else {
 				ui.Button(c, "Send task").Disabled(w.focus == nil || !w.focus.alive || !w.focus.isAgent()).OnClick(func() {
 					if s := w.focus; s != nil && s.alive && s.isAgent() {
+						prompt, err := taskPrompt(*w.task, s.screen != nil && s.screen.BracketedPaste())
+						if err != nil {
+							r.problem = err.Error()
+							return
+						}
+						r.problem = ""
 						w.task.Ready = false
 						t.saveWorkspaces()
 						t.prompted(s)
-						s.write([]byte(w.task.Name + "\r"))
+						s.write([]byte(prompt))
 					}
 				})
+			}
+			if !r.changesView && r.problem != "" {
+				ui.Text(c, r.problem).FontSize(12).TextColor(pal.Waiting)
 			}
 
 		})

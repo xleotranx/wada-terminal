@@ -2555,7 +2555,7 @@ func TestTaskWorkspaceFlow(t *testing.T) {
 	if !strings.Contains(w.texts(), "Local repository") {
 		t.Fatal("task dialog did not open")
 	}
-	if _, err := w.call(control.Request{Method: "do", Action: "task.new", Args: map[string]any{"name": "Fix login redirect", "folder": repo, "agent": "shell"}}); err != nil {
+	if _, err := w.call(control.Request{Method: "do", Action: "task.new", Args: map[string]any{"name": "Fix login redirect", "brief": "Keep sessions\nAdd a regression test", "folder": repo, "agent": "shell"}}); err != nil {
 		t.Fatal(err)
 	}
 	wait := func(predicate func() bool) {
@@ -2583,7 +2583,7 @@ func TestTaskWorkspaceFlow(t *testing.T) {
 		space = *status.Space
 		return true
 	})
-	if space.Task.Name != "Fix login redirect" || space.Folder == repo {
+	if space.Task.Name != "Fix login redirect" || space.Task.Brief != "Keep sessions\nAdd a regression test" || space.Folder == repo {
 		t.Fatalf("task not isolated: %+v", space)
 	}
 	if !strings.Contains(w.texts(), "Send task") {
@@ -2620,7 +2620,7 @@ func TestTaskWorkspaceFlow(t *testing.T) {
 	for _, saved := range list.Spaces {
 		if saved.Task != nil && saved.Task.Dir == space.Folder {
 			taskSpace = saved.ID
-			found = saved.Task.Check != nil && saved.Task.Check.ExitCode == 0
+			found = saved.Task.Check != nil && saved.Task.Check.ExitCode == 0 && saved.Task.Brief == "Keep sessions\nAdd a regression test"
 		}
 	}
 	if !found {
@@ -2631,6 +2631,28 @@ func TestTaskWorkspaceFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	reopened.tt.Frame()
+	if err := reopened.tt.Click("Task brief…"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reopened.texts(), "Task brief") {
+		t.Fatal("task brief dialog did not open")
+	}
+	if err := reopened.tt.Click("Brief editor"); err != nil {
+		t.Fatal(err)
+	}
+	reopened.tt.Key(ui.Cmd, ui.KeyA)
+	reopened.tt.Type("Revised acceptance criteria")
+	if err := reopened.tt.Click("Save brief"); err != nil {
+		t.Fatal(err)
+	}
+	body, err = reopened.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited control.Status
+	if json.Unmarshal(body, &edited) != nil || edited.Space == nil || edited.Space.Task == nil || edited.Space.Task.Brief != "Revised acceptance criteria" {
+		t.Fatalf("edited brief not saved: %s", body)
+	}
 	if err := reopened.tt.Click("Finish task…"); err != nil {
 		t.Fatal(err)
 	}

@@ -59,6 +59,7 @@ func main() {
 	// A command inspects or drives the running window; without one, the app
 	// opens. The commands never start a second window.
 	if len(os.Args) > 1 && isCommand(os.Args[1]) {
+		appdir.UseTerminalContext()
 		os.Exit(cli.Run(app.Name, app.Folder, app.Env, os.Args[1:]))
 	}
 	if os.Getenv("WADATERM_CORE") != "off" {

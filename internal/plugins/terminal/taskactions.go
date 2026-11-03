@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/xleotranx/wada-kit/kernel"
 	"wada-terminal/internal/tasks"
@@ -14,9 +15,12 @@ import (
 
 // taskUI is UI-thread state. Workers receive copies of the task metadata.
 type taskUI struct {
-	open                       bool
-	name, repo, agent, problem string
-	create                     kernel.Task
+	open                              bool
+	name, brief, repo, agent, problem string
+	editOpen                          bool
+	editTask                          *workspace
+	editBrief, editProblem            string
+	create                            kernel.Task
 }
 type taskReview struct {
 	job         kernel.Task
@@ -38,6 +42,7 @@ func (t *Plugin) openTaskDialog() {
 	t.tasksUI.open = true
 	t.tasksUI.repo = repo
 	t.tasksUI.name = ""
+	t.tasksUI.brief = ""
 	t.tasksUI.agent = "Shell"
 	t.tasksUI.problem = ""
 	t.repaint()
@@ -57,7 +62,10 @@ func (t *Plugin) taskAgents() ([]string, map[string]string) {
 	}
 	return labels, ids
 }
-func (t *Plugin) createTask(name, repo, agent string) error {
+func (t *Plugin) createTask(name, brief, repo, agent string) error {
+	if err := validateTaskBrief(brief); err != nil {
+		return err
+	}
 	if t.tasksUI.create.Running() {
 		return fmt.Errorf("a task is already being created")
 	}
@@ -99,6 +107,7 @@ func (t *Plugin) createTask(name, repo, agent string) error {
 			t.repaint()
 			return
 		}
+		task.Brief = brief
 		w := &workspace{id: t.nextID, name: t.uniqueName(task.Name), dir: task.Dir, client: t.core, color: len(t.workspaces) % 5, task: &task}
 		t.nextID++
 		cols, rows := t.defaultSize()
@@ -116,6 +125,38 @@ func (t *Plugin) createTask(name, repo, agent string) error {
 		t.repaint()
 	})
 	return nil
+}
+
+func validateTaskBrief(brief string) error {
+	if len(brief) > 32000 || strings.IndexFunc(brief, func(r rune) bool {
+		return unicode.IsControl(r) && r != '\n' && r != '\t' && r != '\r'
+	}) >= 0 {
+		return fmt.Errorf("task brief must be at most 32,000 bytes and contain no terminal control characters")
+	}
+	return nil
+}
+
+// taskPrompt refuses multiline input unless the program has enabled bracketed
+// paste, so line breaks cannot accidentally submit partial prompts.
+func taskPrompt(task tasks.Task, bracketed bool) (string, error) {
+	if err := validateTaskBrief(task.Brief); err != nil {
+		return "", err
+	}
+	if strings.IndexFunc(task.Name, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("task name contains terminal control characters")
+	}
+	brief := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(task.Brief, "\r\n", "\n"), "\r", "\n"))
+	message := task.Name
+	if brief != "" {
+		message += "\n\n" + brief
+	}
+	if strings.ContainsAny(message, "\n\t") {
+		if !bracketed {
+			return "", fmt.Errorf("the agent has not enabled multiline paste; wait until its prompt is ready")
+		}
+		return "\x1b[200~" + message + "\x1b[201~\r", nil
+	}
+	return message + "\r", nil
 }
 func (t *Plugin) reviewTask(w *workspace) {
 	if w == nil || w.task == nil {
