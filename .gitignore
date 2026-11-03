@@ -1,6 +1,7 @@
 # build output
 /wada-terminal
 /dist/
+/.mygo/dev/
 # local module cache used while a sandbox cannot write the shared one
 /.gomodcache/
 /.tmp/
