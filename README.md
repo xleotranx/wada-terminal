@@ -11,15 +11,31 @@ your agents working.
 
 ![Wada Terminal's panes](docs/images/terminal.png)
 
-Wada Terminal is development software. macOS is the tested platform.
+Wada Terminal is development software. macOS is the tested platform; another
+Unix should build but is untested.
 
 ## Run
 
-Install the Go version in [go.mod](go.mod); the first run needs network access to
-download Go modules and MyGo's native libraries.
+There are no release builds yet; build from a checkout. Requirements:
+
+- the Go version in [go.mod](go.mod), which also provides the `go tool` MyGo
+  runs;
+- network access on the first build, for Go modules and MyGo's libghostty-vt,
+  which MyGo then caches;
+- `git`, for the task workspaces.
+
+From a checkout:
 
 ```sh
 make run
+```
+
+Panes inherit your `PATH`. To run the `wada-terminal` CLI inside a pane, build
+it once and add it:
+
+```sh
+make build-dev
+export PATH="$PWD/dist/dev:$PATH"
 ```
 
 `make run` and `go run .` run the development app; `go tool mygo dev .` adds
@@ -238,7 +254,6 @@ workspace menu, so a capture can show a split, the index or the menu), and
   so a stale explicit write is refused. Mods can
   animate with `api.animate` and transforms, and a runaway script is interrupted
   and shown as an error.
-  [docs/herdr-app.md](docs/herdr-app.md) records the port and what comes next.
 
 ## Layout of the code
 
@@ -265,9 +280,7 @@ workspace menu, so a capture can show a split, the index or the menu), and
 | `internal/pty` | A program on a pseudo-terminal: start, read, write, resize, signal |
 
 The research and design behind the index, measured against [herdr](https://github.com/herdrdev/herdr),
-is in [docs/sessions.md](docs/sessions.md). The port of the newer
-desktop app — its core, status protocol, control API, and what is still to
-come — is in [docs/herdr-app.md](docs/herdr-app.md).
+is in [docs/sessions.md](docs/sessions.md).
 
 Rendering follows the kit's rules: a frame paints cells and performs no I/O, the
 program's bytes arrive through the UI thread, and a worker reads them with the
@@ -373,3 +386,13 @@ wada-terminal do task.check --command "go test ./..."
 the new space's `task` metadata; creation failures open the task dialog with the
 error. Select the intended task space before review/check actions. `task.check`
 retains its result in that metadata when finished.
+
+## Contributing
+
+Bug reports and focused pull requests are welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md). The rules the code follows are in
+[AGENTS.md](AGENTS.md), which is also the guide for agents editing it.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

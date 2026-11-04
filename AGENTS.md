@@ -22,9 +22,12 @@ Onevra components. macOS is the tested platform. This repository is one module,
   shows the core's frames), `layoutspec.go` (saved spaces, tabs, splits and terminal
   ids), `layoutview.go` (the row/column layout tree and the Agents panel),
   `modview.go` (loading mod panels and drawing their trees), `layoutactions.go`
-  (switching a stack), `machines.go`
-  (connecting machine cores, recording their instances and the Machines
-  panel), `config.go`
+  (switching a stack), `machines.go` (connecting machine cores and recording
+  their instances), `machinepanel.go` (the Machines panel), `remotelayout.go`
+  (the spaces document a core keeps, and its import and export), `taskinbox.go`
+  and `taskview.go` (the task queue and the Tasks view), `taskactions.go`,
+  `taskfinish.go` and `taskintegrate.go` (starting, sending, checking,
+  reviewing, finishing and integrating a task), `config.go`
   (loading the interface files and reloading them on save).
   `internal/control` is the window protocol and its action list;
   `internal/cli` is the command line; `internal/core` is the persistent
@@ -32,10 +35,11 @@ Onevra components. macOS is the tested platform. This repository is one module,
   each program's terminal is a headless MyGo terminal, and a window gets
   frames of it (`terminal.Mirror`) on its attach stream;
   `internal/config` is the interface as files, including machines;
-  `internal/mods` is the JavaScript mod runtime; `internal/appdir` is the data
-  folder rule.
-  `docs/sessions.md` and `docs/herdr-app.md` record the design and how it
-  maps onto herdr.
+  `internal/mods` is the JavaScript mod runtime; `internal/tasks` is local Git
+  worktrees, checks and integration receipts, with no UI state;
+  `internal/appdir` is the data folder rule.
+  `docs/sessions.md` records the design of the index and how it maps onto
+  herdr.
 - `internal/status`: reads what the emulator does not report out of a
   program's output: OSC 7501 status reports and queries, bracketed paste
   mode, and hyperlink targets. No screen, no I/O.
