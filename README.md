@@ -46,27 +46,6 @@ the window, so closing it leaves your agents working.
 
 ![The Sessions view: every session in one list, with the blocked agent chosen](docs/images/sessions.png)
 
-## Install
-
-Download the macOS build from
-[Releases](https://github.com/xleotranx/wada-terminal/releases). It is a
-universal app for Apple silicon and Intel and needs macOS 12 or newer.
-
-The build is ad-hoc signed, not notarized by Apple, so macOS blocks the first
-launch. Open it once, then allow it in **System Settings → Privacy & Security →
-Open Anyway**, or run:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/Wada Terminal.app"
-```
-
-Drag the app into Applications, then put its CLI on your `PATH`; the app binary
-is the command line too:
-
-```sh
-ln -s "/Applications/Wada Terminal.app/Contents/MacOS/Wada Terminal" /usr/local/bin/wada-terminal
-```
-
 ## Run from source
 
 Wada Terminal is development software; macOS is the tested platform. Building
