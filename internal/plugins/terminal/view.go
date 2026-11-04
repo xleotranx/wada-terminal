@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/oneo-me/onevra/source/icons/lucide"
+	"github.com/xleotranx/wada-kit/contract/settings"
 )
 
 // defaultSidebarWidth is how wide the column beside the panes is until a
@@ -711,7 +713,7 @@ func (t *Plugin) tabButton(c *ui.Context, ch chrome, w *workspace, i int, tb *ta
 			close.OnClick(func() { t.closeTab(i) })
 		})
 	})
-	btn.OnClick(func() { t.selectTab(i) })
+	btn.OnClick(func() { t.host.ShowPage(terminalPage); t.selectTab(i) })
 }
 
 // tabTitle names split arrangements independently of focus. A single terminal
@@ -736,12 +738,51 @@ func tabTitle(tb *tab) string {
 func (t *Plugin) actions(c *ui.Context) {
 	ch := chromeFor(c)
 	ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(1).Children(func() {
-		if st, n := t.attention(); n > 0 {
-			t.attentionButton(c, ch, st, n)
-		}
-		t.actionButton(c, ch, "▤", t.toggleSidebar)
-		t.actionButton(c, ch, "◫", func() { t.splitFocused(true) })
-		t.actionButton(c, ch, "+", func() { t.newTab(kindShell) })
+		t.titleButtons(c, ch)
+	})
+}
+
+// titleButtons draws the title bar's buttons: the way back from another page,
+// or the window's own actions and the way into Settings. A layout that places
+// a title block draws them with titleActions.
+func (t *Plugin) titleButtons(c *ui.Context, ch chrome) {
+	// The host starts with no page chosen; the shell then shows the terminals.
+	if page := t.host.Page(); page != "" && page != terminalPage {
+		t.backButton(c, ch)
+		return
+	}
+	if st, n := t.attention(); n > 0 {
+		t.attentionButton(c, ch, st, n)
+	}
+	t.actionButton(c, ch, "▤", t.toggleSidebar)
+	t.actionButton(c, ch, "◫", func() { t.splitFocused(true) })
+	t.actionButton(c, ch, "+", func() { t.newTab(kindShell) })
+	t.settingsButton(c, ch)
+}
+
+// settingsButton opens the settings page, as File > Settings… does.
+func (t *Plugin) settingsButton(c *ui.Context, ch chrome) {
+	pal := ch.pal
+	btn := ui.Box(c).Width(24).Height(24).Shrink(0).Radius(6).Center().Cursor(ui.CursorPointer)
+	if btn.Hovered() {
+		btn.Background(pal.Hover)
+	}
+	btn.OnClick(func() { t.host.ShowPage(settings.PageID) })
+	btn.Children(func() {
+		ui.Icon(c, lucide.Settings()).FontSize(13).TextColor(pal.Muted)
+	})
+}
+
+// backButton returns from another page to the terminals.
+func (t *Plugin) backButton(c *ui.Context, ch chrome) {
+	pal := ch.pal
+	btn := ui.Box(c).Height(24).Shrink(0).Radius(6).Padding(0, 9).Center().Cursor(ui.CursorPointer)
+	if btn.Hovered() {
+		btn.Background(pal.Hover)
+	}
+	btn.OnClick(func() { t.host.ShowPage(terminalPage) })
+	btn.Children(func() {
+		ui.Text(c, "← Back").FontSize(11.5).FontWeight(500).TextColor(pal.Muted)
 	})
 }
 
@@ -823,11 +864,6 @@ func (s *session) agentTint() bool {
 func (t *Plugin) titleActions(c *ui.Context) ui.Element {
 	ch := chromeFor(c)
 	return ui.Row(c).FillHeight().AlignItems(ui.Center).Gap(1).Children(func() {
-		if st, n := t.attention(); n > 0 {
-			t.attentionButton(c, ch, st, n)
-		}
-		t.actionButton(c, ch, "▤", t.toggleSidebar)
-		t.actionButton(c, ch, "◫", func() { t.splitFocused(true) })
-		t.actionButton(c, ch, "+", func() { t.newTab(kindShell) })
+		t.titleButtons(c, ch)
 	})
 }

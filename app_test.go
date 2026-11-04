@@ -279,6 +279,29 @@ func TestWorkspaceSwitcherOpens(t *testing.T) {
 	}
 }
 
+// TestSettingsPageReturns checks that opening Settings leaves a way back to
+// the terminals, and that clicking it returns.
+func TestSettingsPageReturns(t *testing.T) {
+	w := startWindow(t)
+	if texts := w.texts(); strings.Contains(texts, "← Back") {
+		t.Fatalf("the terminals show a back button:\n%s", texts)
+	}
+	w.command("settings.open")
+	if texts := w.texts(); !strings.Contains(texts, "Plugins") {
+		t.Fatalf("settings did not open:\n%s", texts)
+	}
+	if !strings.Contains(w.texts(), "← Back") {
+		t.Fatalf("settings has no way back to the terminals:\n%s", w.texts())
+	}
+	if err := w.tt.Click("← Back"); err != nil {
+		t.Fatalf("the back button is not clickable: %v", err)
+	}
+	w.settle()
+	if texts := w.texts(); strings.Contains(texts, "Color theme") {
+		t.Fatalf("the back button did not leave settings:\n%s", texts)
+	}
+}
+
 // TestCommands checks that opening a tab and closing a pane leave a frame that
 // still draws, as the menu bar's commands do.
 func TestCommands(t *testing.T) {

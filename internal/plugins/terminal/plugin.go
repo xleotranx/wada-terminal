@@ -149,6 +149,10 @@ type Plugin struct {
 // defaultFontSize is the terminals' text size until the user zooms.
 const defaultFontSize = 12.5
 
+// terminalPage is the terminals' page in shell.Pages; another page, such as
+// Settings, replaces it until the window shows this one again.
+const terminalPage = "terminal.page"
+
 // New makes the terminal plugin.
 func New() kernel.Plugin { return &Plugin{} }
 
@@ -181,7 +185,7 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 		applied.Set(true)
 	}
 
-	kernel.Contribute(c, shell.Pages, "terminal.page", 0,
+	kernel.Contribute(c, shell.Pages, terminalPage, 0,
 		shell.Page{Title: t.pageTitle, Render: t.page})
 	kernel.Contribute(c, shell.Strip, "terminal.tabs", 0, shell.View{Grow: true,
 		Render: func(c *ui.Context) {
