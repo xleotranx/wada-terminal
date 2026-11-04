@@ -742,15 +742,10 @@ func (t *Plugin) actions(c *ui.Context) {
 	})
 }
 
-// titleButtons draws the title bar's buttons: the way back from another page,
-// or the window's own actions and the way into Settings. A layout that places
-// a title block draws them with titleActions.
+// titleButtons draws the title bar's buttons: the window's own actions and
+// the way into Settings. A layout that places a title block draws them with
+// titleActions.
 func (t *Plugin) titleButtons(c *ui.Context, ch chrome) {
-	// The host starts with no page chosen; the shell then shows the terminals.
-	if page := t.host.Page(); page != "" && page != terminalPage {
-		t.backButton(c, ch)
-		return
-	}
 	if st, n := t.attention(); n > 0 {
 		t.attentionButton(c, ch, st, n)
 	}
@@ -760,10 +755,23 @@ func (t *Plugin) titleButtons(c *ui.Context, ch chrome) {
 	t.settingsButton(c, ch)
 }
 
+// backStrip draws the way back at the top left while another page, such as
+// Settings, is on show. The host starts with no page chosen, which means the
+// terminals.
+func (t *Plugin) backStrip(c *ui.Context) {
+	if page := t.host.Page(); page == "" || page == terminalPage {
+		return
+	}
+	ch := chromeFor(c)
+	ui.Row(c).FillHeight().AlignItems(ui.Center).Children(func() {
+		t.backButton(c, ch)
+	})
+}
+
 // settingsButton opens the settings page, as File > Settings… does.
 func (t *Plugin) settingsButton(c *ui.Context, ch chrome) {
 	pal := ch.pal
-	btn := ui.Box(c).Width(24).Height(24).Shrink(0).Radius(6).Center().Cursor(ui.CursorPointer)
+	btn := ui.Box(c).Width(24).Height(24).Shrink(0).Radius(6).Center().Cursor(ui.CursorPointer).Label("Settings")
 	if btn.Hovered() {
 		btn.Background(pal.Hover)
 	}

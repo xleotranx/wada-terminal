@@ -187,6 +187,8 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 
 	kernel.Contribute(c, shell.Pages, terminalPage, 0,
 		shell.Page{Title: t.pageTitle, Render: t.page})
+	// The way back from another page sits at the top left, before the tabs.
+	kernel.Contribute(c, shell.Strip, "terminal.back", -1, shell.View{Render: t.backStrip})
 	kernel.Contribute(c, shell.Strip, "terminal.tabs", 0, shell.View{Grow: true,
 		Render: func(c *ui.Context) {
 			if t.hasTabsBlock(t.layoutTree()) || t.hasWorkspaceNavigation(t.layoutTree()) {

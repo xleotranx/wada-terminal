@@ -293,12 +293,27 @@ func TestSettingsPageReturns(t *testing.T) {
 	if !strings.Contains(w.texts(), "← Back") {
 		t.Fatalf("settings has no way back to the terminals:\n%s", w.texts())
 	}
+	if back, ok := w.tt.Find("← Back"); !ok || back.X > 500 {
+		t.Fatalf("the way back is not at the top left: %+v shown=%v", back, ok)
+	}
 	if err := w.tt.Click("← Back"); err != nil {
 		t.Fatalf("the back button is not clickable: %v", err)
 	}
 	w.settle()
 	if texts := w.texts(); strings.Contains(texts, "Color theme") {
 		t.Fatalf("the back button did not leave settings:\n%s", texts)
+	}
+}
+
+// TestSettingsButton checks that the title bar's gear opens Settings.
+func TestSettingsButton(t *testing.T) {
+	w := startWindow(t)
+	if err := w.tt.Click("Settings"); err != nil {
+		t.Fatalf("the settings button is not clickable: %v", err)
+	}
+	w.settle()
+	if texts := w.texts(); !strings.Contains(texts, "Plugins") {
+		t.Fatalf("the settings button did not open settings:\n%s", texts)
 	}
 }
 
