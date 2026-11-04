@@ -39,7 +39,7 @@ Onevra components. macOS is the tested platform. This repository is one module,
   worktrees, checks and integration receipts, with no UI state;
   `internal/appdir` is the data folder rule.
   `docs/sessions.md` records the design of the index and how it maps onto
-  herdr.
+  herdr; `docs/tasks.md` records the task workflow.
 - `internal/status`: reads what the emulator does not report out of a
   program's output: OSC 7501 status reports and queries, bracketed paste
   mode, and hyperlink targets. No screen, no I/O.
