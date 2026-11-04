@@ -9,7 +9,7 @@ require (
 	github.com/dop251/goja v0.0.0-20261031103838-cf2ff0ec0b31
 	github.com/egoist/mygo v0.7.4
 	github.com/oneo-me/onevra/source v0.2026.13
-	github.com/xleotranx/wada-kit v0.1.1
+	github.com/xleotranx/wada-kit v0.1.2
 )
 
 require (
