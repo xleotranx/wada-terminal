@@ -593,9 +593,9 @@ func TestResizeReflowsTheLine(t *testing.T) {
 	}
 }
 
-// TestSessionsIndexesEverySession opens the index with its shortcut and
+// TestSessionsViewIndexesEverySession opens the index with its shortcut and
 // finds the sessions the window holds, then gives the keyboard back.
-func TestSessionsIndexesEverySession(t *testing.T) {
+func TestSessionsViewIndexesEverySession(t *testing.T) {
 	w := startWindow(t)
 	// The shortcut belongs to the View menu, which a headless window has no
 	// menu bar to press; the command is what the menu runs.
@@ -628,10 +628,10 @@ func TestSessionsIndexesEverySession(t *testing.T) {
 	}
 }
 
-// TestSessionsFindsABlockedAgent puts a program where Claude Code would be,
+// TestSessionsViewFindsABlockedAgent puts a program where Claude Code would be,
 // has it draw an approval, and waits for the quiet watcher: the pane says the
 // agent needs input, and the index opens on it.
-func TestSessionsFindsABlockedAgent(t *testing.T) {
+func TestSessionsViewFindsABlockedAgent(t *testing.T) {
 	if !hasPTY() {
 		t.Skip("no pseudo-terminals on this machine")
 	}
@@ -663,10 +663,10 @@ func TestSessionsFindsABlockedAgent(t *testing.T) {
 	}
 }
 
-// TestSessionsFollowsOSC7501 puts a program where Claude Code would be,
+// TestSessionsViewFollowsOSC7501 puts a program where Claude Code would be,
 // has it speak the Program Status Protocol instead of drawing an approval, and
 // checks that the pane and the index show what it said.
-func TestSessionsFollowsOSC7501(t *testing.T) {
+func TestSessionsViewFollowsOSC7501(t *testing.T) {
 	if !hasPTY() {
 		t.Skip("no pseudo-terminals on this machine")
 	}

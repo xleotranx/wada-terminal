@@ -115,7 +115,7 @@ func (t *Plugin) body(c *ui.Context, ch chrome, s *session, focused bool) {
 }
 
 // overlayOpen reports whether something over the panes holds the keyboard:
-// the find bar, a dialog, the Sessions or the workspace menu.
+// the find bar, a dialog, the Sessions view or the workspace menu.
 func (t *Plugin) overlayOpen() bool {
 	return t.search.open || t.links.open || t.indexOpen || t.workspaceMenu || t.taskInboxOpen ||
 		t.tasksUI.open || t.tasksUI.editOpen || t.finishUI.open || t.integrateUI.open

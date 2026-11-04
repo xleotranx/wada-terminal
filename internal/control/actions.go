@@ -100,8 +100,8 @@ var Actions = []Action{
 			{Name: "pane", Type: "int", Description: "The pane's id; default the focused one."},
 			{Name: "lines", Type: "int", Description: "How many of the last lines; default all."},
 		}},
-	{Name: "index.open", Description: "Open the Sessions."},
-	{Name: "index.close", Description: "Close the Sessions."},
+	{Name: "index.open", Description: "Open the Sessions view."},
+	{Name: "index.close", Description: "Close the Sessions view."},
 }
 
 // FindAction returns the action with a name.

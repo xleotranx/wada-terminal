@@ -9,7 +9,7 @@ start, so put notes elsewhere.
 
 ## The two programs
 
-- **`wada-terminal`** is the window: spaces, tabs, split panes, the Sessions.
+- **`wada-terminal`** is the window: spaces, tabs, split panes, the Sessions view.
 - **the core** runs the programs. It keeps running when the window closes. The
   window reattaches to its terminals and to the saved layout.
 

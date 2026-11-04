@@ -128,7 +128,7 @@ type Plugin struct {
 	// workspaceMenu is the switcher at the top of the column being open.
 	workspaceMenu bool
 
-	// The Sessions: the overlay over the page, the row it has chosen,
+	// The Sessions view: the overlay over the page, the row it has chosen,
 	// whether the chosen row should be scrolled into view, and the watcher
 	// that settles a working agent once its pane is quiet.
 	indexOpen     bool
@@ -208,7 +208,7 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 	kernel.Contribute(c, shell.Overlays, "terminal.links", 5,
 		shell.View{Render: t.linkDialog})
 	kernel.Contribute(c, shell.Overlays, "terminal.sessions", 10,
-		shell.View{Render: t.sessions})
+		shell.View{Render: t.sessionIndex})
 
 	kernel.Contribute(c, shell.Overlays, "terminal.tasks", 15, shell.View{Render: t.taskDialog})
 	kernel.Contribute(c, shell.Overlays, "terminal.task-brief", 16, shell.View{Render: t.taskBriefDialog})

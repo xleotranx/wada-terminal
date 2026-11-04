@@ -8,26 +8,26 @@ import (
 	"github.com/xleotranx/wada-kit/native"
 )
 
-// entry is one pane in the Sessions: where it sits, and what it runs.
+// entry is one pane in the Sessions list: where it sits, and what it runs.
 type entry struct {
 	w   *workspace
 	tab int
 	s   *session
 }
 
-// sessions is the window's index of every session it holds, across
+// sessionIndex is the window's index of every session it holds, across
 // workspaces, tabs and splits: herdr's agent list, for this terminal. It
 // opens over the page, and a click or Return gives the chosen pane the
 // keyboard.
-func (t *Plugin) sessions(c *ui.Context) {
+func (t *Plugin) sessionIndex(c *ui.Context) {
 	native.Dialog(c, &t.indexOpen, 640, "Sessions", func() {
-		t.sessionsBody(c)
+		t.sessionIndexBody(c)
 	})
 }
 
-// sessionsBody draws the open index: its title, its rows grouped by
+// sessionIndexBody draws the open index: its title, its rows grouped by
 // workspace, and the keys that move through it.
-func (t *Plugin) sessionsBody(c *ui.Context) {
+func (t *Plugin) sessionIndexBody(c *ui.Context) {
 	ch := chromeFor(c)
 	pal := ch.pal
 	entries := t.indexEntries()

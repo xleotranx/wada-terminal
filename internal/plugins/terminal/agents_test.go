@@ -9,7 +9,7 @@ import (
 )
 
 // testSession is a session with no program and no terminal: enough to read
-// the Sessions's state.
+// the agent state.
 func testSession(k kind, id int) *session {
 	sp := k.spec()
 	return &session{id: id, kind: k, name: sp.name, detail: sp.detail, alive: true,

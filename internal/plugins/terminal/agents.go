@@ -8,7 +8,7 @@ import (
 	"wada-terminal/internal/config"
 )
 
-// agentState is what a pane holds, as the Sessions reports it. Herdr's
+// agentState is what a pane holds, as the Sessions view shows it. Herdr's
 // vocabulary, narrowed to what a terminal can see: an agent gets work, draws
 // its progress, asks for an approval, and finishes in a pane the user may not
 // be looking at.
@@ -44,7 +44,7 @@ func (s agentState) label() string {
 }
 
 // settleDelay is how long an agent's pane may be quiet before the
-// Sessions decides it stopped working. It is long enough for a program
+// window decides it stopped working. It is long enough for a program
 // that pauses between two lines, and short enough to notice a prompt.
 const settleDelay = 3 * time.Second
 

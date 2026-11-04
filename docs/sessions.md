@@ -1,7 +1,7 @@
-# The Sessions
+# The Sessions view
 
 Wada Terminal runs several agents at once, each in its own pane, tab and
-workspace. The Sessions is the window's answer to the question that follows:
+workspace. The Sessions view is the window's answer to the question that follows:
 *which one needs me now?* It is one index of every session the window holds,
 with what each program is doing and a way to give it the keyboard.
 
@@ -41,7 +41,7 @@ the index, the state, and the way back to the agent that needs you.
 
 ## What was built
 
-![The Sessions over a window whose agent is waiting for an approval](images/sessions.png)
+![The Sessions view over a window whose agent is waiting for an approval](images/sessions.png)
 
 **The index.** `⌘⇧I`, **View → Sessions**, or the row at the foot of the
 workspace column opens an overlay over the page. It lists every session across
@@ -89,7 +89,7 @@ it, or opening it from the index clears the badge.
 | Blocked when an approval UI matches a manifest rule | A short, conservative list of approval phrases and yes/no choice menus; unfamiliar prompts stay idle |
 | Done until the user views it | Done is set when a quiet, asked agent is not the focused pane, and cleared when it is seen |
 | State rolls up to pane, tab and workspace | The same dots, plus the workspace header's most pressing state |
-| Agent list across workspaces | The Sessions's rows, grouped by workspace |
+| Agent list across workspaces | The Sessions view's rows, grouped by workspace |
 | CLI and socket API | Not yet: the window is the only way in |
 
 ## Deliberate limits

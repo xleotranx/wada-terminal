@@ -17,9 +17,9 @@ the window, so closing it leaves your agents working.
   with its own tabs: `⌘⇧N` adds one, `⌘⇧]` and `⌘⇧[` step between them, and they
   come back after a restart. `⌘B` hides the sidebar.
 - **Which agent needs you** — a dot is green while an agent works, amber when it
-  waits for an answer, blue when it finished unseen. `⌘⇧I` opens the
-  Sessions, one list of every session across spaces, tabs and splits, with
-  the one that needs you chosen first.
+  waits for an answer, blue when it finished unseen. `⌘⇧I` opens the Sessions
+  view, one list of every session across spaces, tabs and splits, with the one
+  that needs you chosen first.
 - **Agents report their own state** — a program that speaks OSC 7501 tells the
   window what it is doing, with a label, a message and progress; any program
   that reports becomes an agent. Programs that never report get a quiet-screen
@@ -44,7 +44,7 @@ the window, so closing it leaves your agents working.
   review, checks and a finish flow. `core machine add vps --ssh vps` records
   another machine's core, and spaces and terminals can run there.
 
-![The Sessions: every session in one list, with the blocked agent chosen](docs/images/sessions.png)
+![The Sessions view: every session in one list, with the blocked agent chosen](docs/images/sessions.png)
 
 ## Install
 
@@ -107,8 +107,8 @@ the interface files. `WADATERM_CORE=off` keeps window-owned sessions, and
 ## Docs
 
 - [docs/tasks.md](docs/tasks.md) — task workspaces, review, checks and finish.
-- [docs/sessions.md](docs/sessions.md) — the session index and its
-  state model.
+- [docs/sessions.md](docs/sessions.md) — the Sessions view and its state
+  model.
 - [docs/performance.md](docs/performance.md) — where the time goes, and how to
   measure it.
 - `wada-terminal skill` — the guide for an agent that drives the window.

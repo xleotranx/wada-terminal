@@ -110,7 +110,7 @@ type session struct {
 	// thread, so a flood costs one post at a time.
 	outputPosted atomic.Bool
 
-	// The Sessions's view of an agent: busy while output or a key just
+	// The agent state the window shows: busy while output or a key just
 	// reached it, blocked while its screen asks for an approval, done when
 	// it finished in a pane the user was not looking at, and asked while a
 	// prompt of the user's has not been answered and seen.

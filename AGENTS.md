@@ -15,8 +15,8 @@ Onevra components. macOS is the tested platform. This repository is one module,
   (the workspace tree, tabs, split layout), `pane.go` (a pane's chrome, its
   terminal view and who holds the keyboard), `search.go` and `linkdialog.go`
   (the find bar and the link picker over a pane), `theme.go` (the terminals'
-  colors and the chrome's), `split.go` (the layout tree), `agents.go` (the Sessions's agent
-  state and quiet watcher), `protocol.go` (OSC 7501 as agent state),
+  colors and the chrome's), `split.go` (the layout tree), `agents.go` (agent state and quiet
+  watcher for Sessions), `protocol.go` (OSC 7501 as agent state),
   `index.go` (the Sessions overlay), `control.go` (the local control
   socket), `remote.go` (a pane attached to a core terminal: its terminal
   shows the core's frames), `layoutspec.go` (saved spaces, tabs, splits and terminal
