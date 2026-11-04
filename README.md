@@ -73,6 +73,10 @@ Wada Terminal is development software; macOS is the tested platform. Building
 needs the Go version in [go.mod](go.mod), network access on the first build for
 Go modules and MyGo's libghostty-vt, and `git` for task workspaces.
 
+The app uses wada-kit v0.2.0. Its terminal plugin explicitly disables automatic
+restart after a failure because Setup can start programs and restore sessions;
+recovery must be an explicit action.
+
 ```sh
 make run
 ```

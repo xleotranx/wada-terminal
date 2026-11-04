@@ -161,6 +161,8 @@ func (*Plugin) Manifest() kernel.Manifest {
 		ID: "terminal", Title: "Terminal", Locked: true,
 		Description: "Agent and shell sessions on real pseudo-terminals, in workspaces, tabs and split panes.",
 		Requires:    []kernel.Named{shell.HostKey},
+		// Setup starts programs and restores sessions; recovery is explicit.
+		Restart: &kernel.Restart{},
 	}
 }
 
