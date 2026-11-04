@@ -22,6 +22,7 @@ func (t *Plugin) page(c *ui.Context) {
 	t.services = c.Services()
 	ch := chromeFor(c)
 	t.modAnimatedFrame = false
+	t.noteOverlay()
 	page := ui.Box(c).Fill().MinWidth(0).MinHeight(0).Background(ch.pal.PanelBg)
 	page.Children(func() {
 		if t.taskInboxOpen {

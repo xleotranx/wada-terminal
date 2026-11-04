@@ -3,18 +3,18 @@ package terminal
 import (
 	"strconv"
 
-	"wada-terminal/internal/vt"
-
+	mterm "github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 )
 
-// searchState is the in-pane find bar and the matches on the focused screen.
+// searchState is the in-pane find bar. The focused pane's terminal searches
+// its screen and scrollback, highlights the matches and scrolls to the one
+// selected; status is how far it got, as it tells (Options.OnSearch).
 type searchState struct {
 	open    bool
 	input   string
 	session *session
-	matches []vt.Match
-	index   int
+	status  mterm.SearchStatus
 }
 
 // openSearch shows the find bar for the focused pane, or hides it.
@@ -24,58 +24,54 @@ func (t *Plugin) openSearch() {
 		return
 	}
 	s := t.currentFocus()
-	if s == nil {
+	if s == nil || s.term == nil {
 		return
 	}
-	t.search = searchState{open: true, session: s, index: -1}
+	t.search = searchState{open: true, session: s}
 	if t.ctx != nil {
 		t.ctx.Invalidate()
 	}
 }
 
-// closeSearch hides the bar and stops highlighting.
+// closeSearch hides the bar and ends the search, with its highlights.
 func (t *Plugin) closeSearch() {
+	if s := t.search.session; s != nil && s.term != nil {
+		s.term.EndSearch()
+	}
 	t.search = searchState{}
 	if t.ctx != nil {
 		t.ctx.Invalidate()
 	}
 }
 
-// searchApply scans the screen for the current query and shows the first hit.
+// searchApply searches the pane for the current query.
 func (t *Plugin) searchApply() {
 	s := t.search.session
-	if s == nil {
+	if s == nil || s.term == nil {
 		return
 	}
-	t.search.matches = s.screen.Search(t.search.input)
-	t.search.index = 0
-	if len(t.search.matches) > 0 {
-		s.screen.ScrollToLine(t.search.matches[0].Line)
-	}
+	t.search.status = mterm.SearchStatus{}
+	s.term.Search(t.search.input)
 	if t.ctx != nil {
 		t.ctx.Invalidate()
 	}
 }
 
-// searchNext moves to the next or previous match and scrolls the screen.
+// searchNext selects the next match up into the scrollback, or with a
+// negative delta the one toward newer output, and shows it.
 func (t *Plugin) searchNext(delta int) {
-	if t.search.session == nil || len(t.search.matches) == 0 {
+	s := t.search.session
+	if s == nil || s.term == nil {
 		return
 	}
-	n := len(t.search.matches)
-	t.search.index = (t.search.index + delta + n) % n
-	t.search.session.screen.ScrollToLine(t.search.matches[t.search.index].Line)
+	if delta < 0 {
+		s.term.SearchPrevious()
+	} else {
+		s.term.SearchNext()
+	}
 	if t.ctx != nil {
 		t.ctx.Invalidate()
 	}
-}
-
-// searchHighlight reports whether a cell is part of a match in this session.
-func (t *Plugin) searchHighlight(s *session, y, x int) bool {
-	if !t.search.open || t.search.session != s || len(t.search.matches) == 0 {
-		return false
-	}
-	return s.screen.SearchHighlight(t.search.matches, y, x)
 }
 
 // searchBar draws the find field above the panes.
@@ -89,11 +85,12 @@ func (t *Plugin) searchBar(c *ui.Context, ch chrome) {
 		changed := input.Changed()
 		submitted := input.Submitted()
 		count := ""
-		if t.search.input != "" {
-			if len(t.search.matches) == 0 {
+		if st := t.search.status; t.search.input != "" && st.Text == t.search.input {
+			switch {
+			case st.Total > 0:
+				count = strconv.Itoa(st.Selected) + "/" + strconv.Itoa(st.Total)
+			case !st.Searching:
 				count = "No matches"
-			} else {
-				count = strconv.Itoa(t.search.index+1) + "/" + strconv.Itoa(len(t.search.matches))
 			}
 		}
 		if count != "" {
@@ -104,13 +101,13 @@ func (t *Plugin) searchBar(c *ui.Context, ch chrome) {
 			prev.Background(pal.Hover)
 		}
 		prev.Children(func() { ui.Text(c, "↑").FontSize(10).TextColor(pal.Muted) })
-		prev.OnClick(func() { t.searchNext(-1) })
+		prev.OnClick(func() { t.searchNext(1) })
 		next := ui.Box(c).Width(20).Height(20).Shrink(0).Radius(4).Center().Cursor(ui.CursorPointer)
 		if next.Hovered() {
 			next.Background(pal.Hover)
 		}
 		next.Children(func() { ui.Text(c, "↓").FontSize(10).TextColor(pal.Muted) })
-		next.OnClick(func() { t.searchNext(1) })
+		next.OnClick(func() { t.searchNext(-1) })
 		close := ui.Box(c).Width(20).Height(20).Shrink(0).Radius(4).Center().Cursor(ui.CursorPointer)
 		if close.Hovered() {
 			close.Background(pal.Hover)
@@ -132,36 +129,4 @@ func (t *Plugin) currentFocus() *session {
 		return nil
 	}
 	return t.current.focus
-}
-
-// viHighlight reports whether the cell at row y, column x is inside the
-// visual selection.
-func (t *Plugin) viHighlight(s *session, y, x int) bool {
-	if s == nil || !s.scrollMode || !s.viVisual {
-		return false
-	}
-	line := s.screen.VisibleTop() + y
-	startLine, startCol := s.viAnchor, s.viAnchorCol
-	endLine, endCol := s.viCursor, s.viCursorCol
-	if startLine > endLine || (startLine == endLine && startCol > endCol) {
-		startLine, endLine = endLine, startLine
-		startCol, endCol = endCol, startCol
-	}
-	if line < startLine || line > endLine {
-		return false
-	}
-	if s.viLinewise {
-		return true
-	}
-	if startLine == endLine {
-		return line == startLine && x >= startCol && x <= endCol
-	}
-	switch line {
-	case startLine:
-		return x >= startCol
-	case endLine:
-		return x <= endCol
-	default:
-		return true
-	}
 }

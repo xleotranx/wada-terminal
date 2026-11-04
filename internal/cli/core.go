@@ -342,7 +342,6 @@ parsed:
 	rec, err := client.Start(core.Start{
 		Argv: program, Kind: kind, Name: name, Parent: parentAddress(), Notify: notify, Dir: cwd,
 		Cols: cols, Rows: rows, Dark: true, Labels: labels,
-		FgRGB: [3]uint8{255, 255, 255}, BgRGB: [3]uint8{0, 0, 0},
 	})
 	if err != nil {
 		coreError(err)
@@ -363,7 +362,7 @@ parsed:
 	if background {
 		return 0
 	}
-	stream, _, err := client.Attach(rec.ID, rec.Cols, rec.Rows, [3]uint8{255, 255, 255}, [3]uint8{0, 0, 0})
+	stream, err := client.Attach(rec.ID, rec.Cols, rec.Rows, nil)
 	if err != nil {
 		coreError(err)
 		return 1

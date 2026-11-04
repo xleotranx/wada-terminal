@@ -95,13 +95,13 @@ func (t *Plugin) applyTheme(name string) {
 	t.themeName = name
 	if theme == nil {
 		t.theme = nil
-		t.refreshSessionColors()
+		t.refreshSessionThemes()
 		t.ctx.Invalidate()
 		return
 	}
 	surface := surfaceFromTheme(theme)
 	t.theme = &surface
-	t.refreshSessionColors()
+	t.refreshSessionThemes()
 	t.ctx.Invalidate()
 }
 
@@ -195,15 +195,6 @@ func (t *Plugin) watchConfig() {
 			t.ctx.Post(t.reloadConfig)
 		}
 	})
-}
-
-// refreshSessionColors tells every screen the palette a program reads when it
-// asks for the terminal's foreground and background.
-func (t *Plugin) refreshSessionColors() {
-	sf := t.surface()
-	for _, s := range t.allSessions() {
-		s.reportColors(sf)
-	}
 }
 
 // configProblem says which file did not load and why, once per save.

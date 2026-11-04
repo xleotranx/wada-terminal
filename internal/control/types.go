@@ -42,29 +42,21 @@ type Tab struct {
 
 // Pane is one session on screen.
 type Pane struct {
-	ID             int    `json:"id"`
-	Kind           string `json:"kind"` // claude, codex, opencode or shell
-	Title          string `json:"title"`
-	Detail         string `json:"detail,omitempty"`
-	Cwd            string `json:"cwd"`
-	Machine        string `json:"machine,omitempty"`
-	Focused        bool   `json:"focused"`
-	Agent          bool   `json:"agent"`
-	App            string `json:"app,omitempty"`      // the program's own 7501 name
-	Word           string `json:"word,omitempty"`     // the program's own 7501 state
-	Message        string `json:"message,omitempty"`  // the program's 7501 message
-	Progress       int    `json:"progress,omitempty"` // 0-100, when it reported one
-	State          string `json:"state"`              // idle, working, blocked, done, running or stopped
-	Cols           int    `json:"cols"`
-	Rows           int    `json:"rows"`
-	ScrollMode     bool   `json:"scrollMode,omitempty"`
-	Scrolled       int    `json:"scrolled,omitempty"`
-	Visual         bool   `json:"visual,omitempty"`
-	VisualLinewise bool   `json:"visualLinewise,omitempty"`
-	VisualFrom     int    `json:"visualFrom,omitempty"`
-	VisualTo       int    `json:"visualTo,omitempty"`
-	VisualFromCol  int    `json:"visualFromCol,omitempty"`
-	VisualToCol    int    `json:"visualToCol,omitempty"`
+	ID       int    `json:"id"`
+	Kind     string `json:"kind"` // claude, codex, opencode or shell
+	Title    string `json:"title"`
+	Detail   string `json:"detail,omitempty"`
+	Cwd      string `json:"cwd"`
+	Machine  string `json:"machine,omitempty"`
+	Focused  bool   `json:"focused"`
+	Agent    bool   `json:"agent"`
+	App      string `json:"app,omitempty"`      // the program's own 7501 name
+	Word     string `json:"word,omitempty"`     // the program's own 7501 state
+	Message  string `json:"message,omitempty"`  // the program's 7501 message
+	Progress int    `json:"progress,omitempty"` // 0-100, when it reported one
+	State    string `json:"state"`              // idle, working, blocked, done, running or stopped
+	Cols     int    `json:"cols"`
+	Rows     int    `json:"rows"`
 }
 
 // List is what `ls` says: every space, tab and session in the window.

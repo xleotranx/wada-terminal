@@ -3,15 +3,15 @@ package terminal
 import (
 	"strings"
 
-	"wada-terminal/internal/vt"
+	"wada-terminal/internal/status"
 )
 
-// applyStatusReports takes the program's OSC 7501 reports from its screen and
-// moves the session's state to what they say. A program that reports is an
-// agent whatever kind it started as: the protocol, not the program's name, is
-// what makes an agent here.
-func (s *session) applyStatusReports() {
-	for _, st := range s.screen.TakeStatusReports() {
+// applyStatusReports moves the session's state to what the program's OSC
+// 7501 reports say, in order. A program that reports is an agent whatever
+// kind it started as: the protocol, not the program's name, is what makes an
+// agent here.
+func (s *session) applyStatusReports(reports []status.Status) {
+	for _, st := range reports {
 		s.applyStatusReport(st)
 	}
 }
@@ -21,7 +21,7 @@ func (s *session) applyStatusReports() {
 // states, it is seen only if the user was looking at its pane. An unseen
 // finish is what the window calls Done. A report for a child record changes
 // no root state, but it still marks the program as one that reports.
-func (s *session) applyStatusReport(st vt.Status) {
+func (s *session) applyStatusReport(st status.Status) {
 	// Any report takes the program out of the screen-reading fallback for
 	// good: a protocol this explicit should never be second-guessed.
 	if !s.reported {

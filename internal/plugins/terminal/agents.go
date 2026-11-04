@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"wada-terminal/internal/config"
-	"wada-terminal/internal/vt"
 )
 
 // agentState is what a pane holds, as the Sessions reports it. Herdr's
@@ -214,7 +213,7 @@ func (s *session) settle(watched bool) bool {
 	before := s.agentState()
 	s.busy = false
 	if s.isAgent() {
-		if blockedOnScreen(s.screen) {
+		if blockedOnScreen(screenTail(s.screenText(), 12)) {
 			s.blocked = true
 			s.done = false
 		} else {
@@ -346,14 +345,10 @@ var actionWords = map[string]bool{
 	"remove": true, "replace": true, "save": true, "send": true,
 }
 
-// blockedOnScreen reads the bottom of an agent's live screen, not the part
-// scrolled back, and reports whether it shows an approval or a choice with a
-// cursor on it.
-func blockedOnScreen(screen *vt.Screen) bool {
-	if screen == nil {
-		return false
-	}
-	lines := screenTail(screen, 12)
+// blockedOnScreen reads the last lines of an agent's live screen, not the
+// part scrolled back, and reports whether they show an approval or a choice
+// with a cursor on it.
+func blockedOnScreen(lines []string) bool {
 	if len(lines) == 0 {
 		return false
 	}
@@ -405,23 +400,14 @@ func numberedChoice(line, n string) bool {
 	return strings.HasPrefix(rest, ".") || strings.HasPrefix(rest, ")")
 }
 
-// screenTail is the last max non-empty lines of a screen, top line first.
-func screenTail(screen *vt.Screen, max int) []string {
-	_, rows := screen.Size()
+// screenTail is the last max non-empty lines of a terminal's text, top line
+// first: the bottom of what the program last drew, whatever the view shows
+// scrolled back.
+func screenTail(text string, max int) []string {
+	all := strings.Split(text, "\n")
 	lines := make([]string, 0, max)
-	for y := rows - 1; y >= 0 && len(lines) < max; y-- {
-		var b strings.Builder
-		for _, cell := range screen.BottomRow(y) {
-			if cell.Width == 0 {
-				continue // the second half of a wide character
-			}
-			if cell.Text == "" {
-				b.WriteByte(' ')
-			} else {
-				b.WriteString(cell.Text)
-			}
-		}
-		if line := strings.TrimSpace(b.String()); line != "" {
+	for y := len(all) - 1; y >= 0 && len(lines) < max; y-- {
+		if line := strings.TrimSpace(all[y]); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -448,7 +434,7 @@ func (t *Plugin) adoptAgent(s *session) bool {
 	before, beforeGlyph := s.agent, s.agentGlyph
 	id, def, ok := t.matchAgent(s.foreground)
 	if !ok {
-		id, def, ok = t.matchAgent(s.screen.Title())
+		id, def, ok = t.matchAgent(s.programTitle())
 	}
 	if ok {
 		s.agent, s.detected, s.agentID = true, true, id

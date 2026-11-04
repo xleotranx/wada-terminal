@@ -12,17 +12,24 @@ import (
 //
 //	[type:1][length:4 little endian][payload]
 //
-// The core sends a snapshot first, then the program's output and finally why
-// it ended. A viewer sends input, a resize, or nothing.
+// The core sends the size its terminal has and what the window needs beside
+// the screen, then frames of the screen (terminal.Mirror) as the program
+// draws, and finally why it ended. Each first frame of a stream starts the
+// window's terminal over, so a window that attaches again shows the screen as
+// it is. A viewer sends input, the size and colors it shows the terminal at,
+// and the user's clears.
 const (
-	frameSnapshot byte = iota // a gob-encoded vt.Snapshot
-	frameData                 // raw bytes from the program
-	frameExit                 // a JSON Exit
-	frameInput                // raw bytes to the program
-	frameResize               // cols u16, rows u16
+	frameResized byte = iota // cols u16, rows u16: the size the next frames are drawn at
+	frameData                // VT sequences that bring the window's terminal to the core's
+	frameExit                // a JSON Exit
+	frameInput               // raw bytes to the program
+	frameResize              // cols u16, rows u16, cell width u16, cell height u16
+	frameInfo                // a JSON Info: status reports and modes the screen does not carry
+	frameTheme               // a JSON Theme: the colors the window shows
+	frameClear               // the user cleared the screen
 )
 
-// maxFrame bounds one frame: a snapshot of a large scrollback fits.
+// maxFrame bounds one frame: a first frame with a large scrollback fits.
 const maxFrame = 32 << 20
 
 // writeFrame writes one frame to a buffered writer.

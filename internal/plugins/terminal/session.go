@@ -1,25 +1,25 @@
 package terminal
 
 import (
-	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"wada-terminal/internal/appdir"
 	"wada-terminal/internal/config"
 	"wada-terminal/internal/core"
 	"wada-terminal/internal/pty"
-	"wada-terminal/internal/vt"
+	"wada-terminal/internal/status"
 
 	"github.com/xleotranx/wada-kit/kernel"
 
+	mterm "github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -54,11 +54,13 @@ func (k kind) spec() spec {
 	}
 }
 
-// session is one program on a pseudo-terminal, with the screen it draws.
+// session is one program on a pseudo-terminal, and the terminal that shows it:
+// MyGo's terminal view, which draws, selects, scrolls, searches and takes the
+// keyboard. Its screen is the core's (remote), shown as frames of the core's
+// terminal, or else the window's own, reading the program.
 //
-// The program's bytes come to the UI thread through push, which the reader
-// worker calls; feed and everything else in a session belongs to the UI
-// thread alone.
+// Everything in a session belongs to the UI thread; the terminal's callbacks
+// and the readers reach it through its scope's posts.
 type session struct {
 	t       *Plugin
 	id      int
@@ -79,22 +81,34 @@ type session struct {
 	foreground string
 	argv       []string
 
-	scope  *kernel.Scope
-	proc   *pty.Session
-	screen *vt.Screen
-	alive  bool
+	scope *kernel.Scope
+	term  *mterm.Terminal
+	proc  *pty.Session // the program, when the window runs it rather than the core
+	alive bool
 
-	// remote is a session whose program runs in the core: its screen is a
-	// mirror of the core's, input goes over the attach stream, and closing
-	// the window detaches rather than ends it. coreID is its address there.
-	remote   bool
-	coreID   int
-	stream   *core.Stream
-	streamMu sync.Mutex
-	closing  atomic.Bool
-	status   string // what the pane says instead of a screen, once the program stopped
-	cols     int
-	rows     int
+	// remote is a session whose program runs in the core: its terminal shows
+	// the core's frames, input goes over the attach stream, and closing the
+	// window detaches rather than ends it. coreID is its address there.
+	remote  bool
+	coreID  int
+	stream  *core.Stream
+	closing atomic.Bool
+	status  string // what the pane says instead of a screen, once the program stopped
+	exitErr error  // why a program the window ran ended, from its reader
+	cols    int
+	rows    int
+
+	// progTitle and progCwd are what a remote program set (OSC 0, 2 and 7),
+	// which the core tells; a local terminal is asked directly.
+	progTitle string
+	progCwd   string
+	// bracketed tells that the program asked for bracketed paste; links are
+	// the targets of the hyperlinks it printed (OSC 8), newest last.
+	bracketed bool
+	links     []string
+	// outputPosted holds while word of output is on its way to the UI
+	// thread, so a flood costs one post at a time.
+	outputPosted atomic.Bool
 
 	// The Sessions's view of an agent: busy while output or a key just
 	// reached it, blocked while its screen asks for an approval, done when
@@ -117,37 +131,6 @@ type session struct {
 	done         bool
 	asked        bool
 	lastWork     time.Time
-
-	// inbox is the worker's way in: bytes appended under mu, with one post
-	// to drain them while posted holds.
-	mu      sync.Mutex
-	inbox   []byte
-	posted  bool
-	drained time.Time // when the UI thread last applied the inbox
-	body    ui.Handle
-	started bool
-
-	// fg and bg are the colors last reported to the program, so a frame
-	// tells the screen only when the appearance changed.
-	fg, bg [3]uint8
-
-	// sel is what a drag picked in the pane, in the screen's viewport
-	// coordinates: rows and columns of cells, not bytes.
-	sel selection
-	// mouseBtn is the button a mouse report holds, -1 when none, and
-	// hoverLink whether the pointer rests on a hyperlink.
-	mouseBtn int
-	hoverURL string
-
-	// scrollMode keeps typed keys for moving through the scrollback instead
-	// of sending them to the program; viVisual selects whole lines.
-	scrollMode  bool
-	viVisual    bool
-	viLinewise  bool
-	viAnchor    int
-	viCursor    int
-	viAnchorCol int
-	viCursorCol int
 }
 
 // start runs the program of kind k in dir on a new terminal of the given size.
@@ -174,12 +157,11 @@ func (t *Plugin) newAgent(id string) {
 // startProgram starts an agent's own argv, local or on a machine.
 func (t *Plugin) startProgram(def config.Agent, id, machine string, client *core.Client, dir string, cols, rows int) *session {
 	s := &session{t: t, id: t.nextID, kind: kindShell, dir: dir, cols: cols, rows: rows,
-		screen: vt.New(max(cols, 2), max(rows, 2)), alive: true, name: def.Name,
+		alive: true, name: def.Name,
 		detail: filepath.Base(def.Command[0]), agent: true, agentID: id,
 		agentGlyph: def.Glyph, agentColor: def.Color, argv: append([]string(nil), def.Command...),
-		machine: machine, client: client, mouseBtn: -1, seen: true, wordProgress: -1}
+		machine: machine, client: client, seen: true, wordProgress: -1}
 	t.nextID++
-	s.reportColors(t.surface())
 	if client != nil && t.startRemote(s, def.Command) {
 		return s
 	}
@@ -192,17 +174,7 @@ func (t *Plugin) startProgram(def config.Agent, id, machine string, client *core
 		}
 		return s
 	}
-	proc, err := pty.Start(pty.Options{Argv: def.Command, Env: terminalEnv(dir, t.host.DataDir(), t.dark()), Dir: dir,
-		Cols: max(cols, 2), Rows: max(rows, 2)})
-	if err != nil {
-		s.alive = false
-		s.status = err.Error()
-		return s
-	}
-	s.proc = proc
-	s.scope = t.ctx.NewScope()
-	s.scope.OnDispose(func() { _ = proc.Close() })
-	s.readLoop()
+	t.startLocal(s, def.Command)
 	return s
 }
 
@@ -212,8 +184,8 @@ func (t *Plugin) startProgram(def config.Agent, id, machine string, client *core
 func (t *Plugin) startAt(machine string, client *core.Client, k kind, dir string, cols, rows int) *session {
 	sp := k.spec()
 	s := &session{t: t, id: t.nextID, kind: k, dir: dir, cols: cols, rows: rows,
-		screen: vt.New(max(cols, 2), max(rows, 2)), alive: true, name: sp.name, detail: sp.detail,
-		mouseBtn: -1, seen: true, wordProgress: -1, machine: machine, client: client}
+		alive: true, name: sp.name, detail: sp.detail,
+		seen: true, wordProgress: -1, machine: machine, client: client}
 	t.nextID++
 
 	var argv []string
@@ -240,11 +212,6 @@ func (t *Plugin) startAt(machine string, client *core.Client, k kind, dir string
 		s.detail = filepath.Base(argv[0])
 	}
 
-	// A program asks for the terminal's colors as it starts, before the
-	// first frame knows the appearance: tell the screen now, so the answer
-	// it gets is the one the pane will paint.
-	s.reportColors(t.surface())
-
 	if client != nil && t.startRemote(s, argv) {
 		return s
 	}
@@ -257,17 +224,38 @@ func (t *Plugin) startAt(machine string, client *core.Client, k kind, dir string
 		}
 		return s
 	}
-	proc, err := pty.Start(pty.Options{Argv: argv, Env: terminalEnv(dir, t.host.DataDir(), t.dark()), Dir: dir, Cols: max(cols, 2), Rows: max(rows, 2)})
+	t.startLocal(s, argv)
+	return s
+}
+
+// startLocal runs the program on a pseudo-terminal of the window's own, which
+// the session's terminal reads: the window has no core, and the program ends
+// with it.
+func (t *Plugin) startLocal(s *session, argv []string) {
+	proc, err := pty.Start(pty.Options{Argv: argv, Env: terminalEnv(s.dir, t.host.DataDir(), t.dark()), Dir: s.dir,
+		Cols: max(s.cols, 2), Rows: max(s.rows, 2)})
 	if err != nil {
 		s.alive = false
 		s.status = err.Error()
-		return s
+		return
 	}
 	s.proc = proc
 	s.scope = t.ctx.NewScope()
-	s.scope.OnDispose(func() { _ = proc.Close() })
-	s.readLoop()
-	return s
+	conn := &localConn{s: s, proc: proc}
+	term, err := mterm.New(t.terminalOptions(s, conn))
+	if err != nil {
+		_ = proc.Close()
+		s.scope.Dispose()
+		s.alive = false
+		s.status = "The terminal could not start: " + err.Error()
+		return
+	}
+	term.Resize(max(s.cols, 2), max(s.rows, 2))
+	s.term = term
+	s.scope.OnDispose(func() {
+		_ = term.Close()
+		_ = proc.Close()
+	})
 }
 
 // commandFor resolves the program of a spec, preferring the first candidate
@@ -313,151 +301,158 @@ func terminalEnv(dir, dataDir string, dark bool) []string {
 	return env
 }
 
-// readLoop reads the program's output until it ends, and reports its end on
-// the UI thread. It runs in a scope worker.
-func (s *session) readLoop() {
-	proc := s.proc
-	s.scope.Spawn(func(ctx context.Context) {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := proc.Read(buf)
-			if n > 0 {
-				s.push(buf[:n])
-			}
-			if err != nil {
-				break
-			}
-			if ctx.Err() != nil {
-				break
-			}
+// maxLinks is how many hyperlink targets a session keeps for the link picker.
+const maxLinks = 200
+
+// localConn is the Conn of a terminal whose program the window runs: what
+// the program writes goes to the terminal, after the status reports and the
+// bracketed paste mode are read out of it, which the emulator does not
+// report. Its Read runs on the terminal's goroutine.
+type localConn struct {
+	s    *session
+	proc *pty.Session
+	scan status.Stream // the reader's alone
+	mode bool          // bracketed paste as last posted
+}
+
+func (c *localConn) Read(p []byte) (int, error) {
+	n, err := c.proc.Read(p)
+	if n > 0 {
+		c.scan.Write(p[:n])
+		for _, reply := range c.scan.TakeReplies() {
+			_, _ = c.proc.Write([]byte(reply))
 		}
-		err := proc.Wait()
-		s.scope.Post(func() { s.t.closed(s, err) })
+		reports, links, bracketed := c.scan.TakeReports(), c.scan.TakeLinks(), c.scan.Bracketed()
+		if len(reports) > 0 || len(links) > 0 || bracketed != c.mode {
+			c.mode = bracketed
+			s := c.s
+			s.scope.Post(func() {
+				s.bracketed = bracketed
+				s.links = status.AppendLinks(s.links, links, maxLinks)
+				s.applyStatusReports(reports)
+				s.t.ctx.Invalidate()
+			})
+		}
+		c.s.outputSoon()
+	}
+	if err != nil {
+		// The program closed its terminal: why it ended is the session's,
+		// before the terminal says it did.
+		waitErr := c.proc.Wait()
+		s := c.s
+		s.scope.Post(func() { s.exitErr = waitErr })
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (c *localConn) Write(p []byte) (int, error) { return c.proc.Write(p) }
+
+// Resize gives the program the size the pane fits.
+func (c *localConn) Resize(cols, rows int) error {
+	s := c.s
+	s.scope.Post(func() { s.cols, s.rows = cols, rows })
+	return c.proc.Resize(cols, rows)
+}
+
+func (c *localConn) Close() error { return c.proc.Close() }
+
+// terminalOptions is how a session's terminal looks and what it tells the
+// session: the window's font and colors, and its program's title, output,
+// keys and end.
+func (t *Plugin) terminalOptions(s *session, conn io.ReadWriteCloser) mterm.Options {
+	light, dark := t.terminalThemes()
+	return mterm.Options{
+		Conn:  conn,
+		Font:  t.terminalFont(),
+		Theme: light, DarkTheme: dark,
+		Cursor:  mterm.CursorBar,
+		Padding: mterm.Padding{X: bodyPadX, Y: bodyPadY},
+		OnTitle: func(string) {
+			s.scope.Post(func() {
+				t.detectAgent(s)
+				t.ctx.Invalidate()
+			})
+		},
+		OnExit: func(int) { s.scope.Post(s.ended) },
+		// A key typed into an agent's pane is what gives it work to finish.
+		OnKey: func(ui.Modifiers, ui.Key) bool {
+			t.prompted(s)
+			return false
+		},
+		// The window's own keys and its View menu zoom every pane together.
+		OnZoom: func(z mterm.Zoom) bool {
+			if z.Reset {
+				t.setFont(defaultFontSize)
+			} else {
+				t.zoomFont(z.Steps)
+			}
+			return true
+		},
+		OnSearch: func(st mterm.SearchStatus) {
+			if t.search.session == s {
+				t.search.status = st
+				t.ctx.Invalidate()
+			}
+		},
+		// Clearing a core's terminal here alone would leave its next
+		// frames drawn from a screen still full: the core clears.
+		OnClear: func(mterm.Clear) bool {
+			if s.remote && s.stream != nil {
+				_ = s.stream.Clear()
+				return true
+			}
+			return false
+		},
+	}
+}
+
+// outputSoon tells the UI thread that the program drew, once per post: an
+// agent that draws is working until it is quiet. It runs on a reader.
+func (s *session) outputSoon() {
+	if !s.outputPosted.CompareAndSwap(false, true) {
+		return
+	}
+	s.scope.PostQuiet(func() {
+		s.outputPosted.Store(false)
+		s.t.agentOutput(s)
 	})
 }
 
-// feedGap is how often a pane applies what its program wrote while output
-// keeps coming. Bytes that arrive within it are one batch: a flood then costs
-// a post and a parse per gap, not one per read, which is most of the window's
-// CPU while a program streams.
-const feedGap = 8 * time.Millisecond
-
-// push appends what the program wrote and asks the UI thread to take it,
-// once, however many reads come before it runs. A read that follows one
-// applied a moment ago waits for the rest of the gap, so a flood reaches the
-// window as large batches; output after a pause goes at once, which keeps
-// typing responsive.
-func (s *session) push(b []byte) {
-	s.mu.Lock()
-	s.inbox = append(s.inbox, b...)
-	post := !s.posted
-	if post {
-		s.posted = true
-	}
-	wait := feedGap - time.Since(s.drained)
-	s.mu.Unlock()
-	if !post {
+// ended records that the terminal's program ended, or that its stream to
+// the core did; nothing when the window closed it.
+func (s *session) ended() {
+	if !s.alive || s.closing.Load() {
 		return
 	}
-	if wait <= 0 {
-		s.postFeed()
-		return
-	}
-	time.AfterFunc(wait, s.postFeed)
-}
-
-// postFeed asks the UI thread to apply the inbox and draw what it changed.
-func (s *session) postFeed() {
-	if s.scope == nil {
-		return
-	}
-	s.scope.Post(func() {
-		s.mu.Lock()
-		b := s.inbox
-		s.inbox = nil
-		s.posted = false
-		s.drained = time.Now()
-		s.mu.Unlock()
-		if len(b) > 0 {
-			s.feed(b)
-		}
-	})
-}
-
-// feed applies what the program wrote to the screen, and answers what it
-// asked — its attributes, the cursor's position, the colors — so a program
-// that waits for a reply gets one.
-func (s *session) feed(b []byte) {
-	s.screen.Write(b)
-	s.t.detectAgent(s)
-	s.applyStatusReports()
-	s.t.agentOutput(s)
-	replies := s.screen.TakeResponses()
 	if s.remote {
-		return // the core answers the program's queries, once
-	}
-	for _, reply := range replies {
-		s.write([]byte(reply))
-	}
-}
-
-// reportColors tells the screen the colors of the surface it shows on, which
-// it reports to a program that asks (OSC 10 and 11).
-func (s *session) reportColors(sf surface) {
-	fg, bg := [3]uint8{sf.fg.R, sf.fg.G, sf.fg.B}, [3]uint8{sf.bg.R, sf.bg.G, sf.bg.B}
-	if fg == s.fg && bg == s.bg {
+		exit := s.stream.Exit()
+		if exit == nil {
+			return // closed here
+		}
+		var err error
+		if exit.Error != "" {
+			err = errors.New(exit.Error)
+		}
+		s.t.closed(s, err)
 		return
 	}
-	s.fg, s.bg = fg, bg
-	s.screen.SetColors(fg, bg)
+	s.t.closed(s, s.exitErr)
 }
 
 // write gives the program input, as keys typed into the pane.
 func (s *session) write(b []byte) {
-	if len(b) == 0 {
+	if len(b) == 0 || s.term == nil || !s.alive {
 		return
 	}
-	if s.remote {
-		s.sendInput(b)
-		return
-	}
-	if s.proc == nil || !s.alive {
-		return
-	}
-	_, _ = s.proc.Write(b)
+	s.term.Send(b)
 }
 
-// resize keeps the screen and the program's terminal the same size.
-func (s *session) resize(cols, rows int) {
-	if cols < 2 || rows < 2 || (cols == s.cols && rows == s.rows) {
-		return
-	}
-	s.cols, s.rows = cols, rows
-	s.screen.Resize(cols, rows)
-	if s.remote {
-		s.sendResize(cols, rows)
-		return
-	}
-	if s.proc != nil {
-		// A failed resize leaves the program drawing at its old size, which
-		// the screen crops; nothing else to do about it.
-		_ = s.proc.Resize(cols, rows)
-	}
-}
-
-// kill ends the program and its workers, and forgets the session.
+// kill ends the program and its terminal, and forgets the session.
 func (s *session) kill() {
-	if s.remote {
-		s.closing.Store(true)
-		s.closeStream()
-		if s.client != nil && s.coreID > 0 {
-			_ = s.client.Kill(s.coreID)
-		}
-		if s.scope != nil {
-			s.scope.Dispose()
-		}
-		s.alive = false
-		return
+	s.closing.Store(true)
+	if s.remote && s.client != nil && s.coreID > 0 {
+		_ = s.client.Kill(s.coreID)
 	}
 	if s.scope != nil {
 		s.scope.Dispose()
@@ -492,7 +487,7 @@ func (s *session) subtitle() string {
 			return "" // the title already carries the program's name
 		}
 	}
-	name := strings.TrimSpace(s.screen.Title())
+	name := strings.TrimSpace(s.programTitle())
 	if s.alive && name != "" && name != s.name {
 		return name
 	}
@@ -501,10 +496,35 @@ func (s *session) subtitle() string {
 
 // cwd is where the program says it is, or where it started.
 func (s *session) cwd() string {
-	if dir := s.screen.Cwd(); dir != "" {
+	if dir := s.programCwd(); dir != "" {
 		return dir
 	}
 	return s.dir
+}
+
+// programTitle is the title the program set, if any.
+func (s *session) programTitle() string {
+	if s.remote || s.term == nil {
+		return s.progTitle
+	}
+	return s.term.Title()
+}
+
+// programCwd is the directory the program reported, if any.
+func (s *session) programCwd() string {
+	if s.remote || s.term == nil {
+		return s.progCwd
+	}
+	return s.term.Dir()
+}
+
+// screenText is what the terminal shows, with its scrollback, a line per
+// row; empty before the terminal exists.
+func (s *session) screenText() string {
+	if s.term == nil {
+		return ""
+	}
+	return s.term.Text()
 }
 
 // state is what the pane's status dot reports: "running", "stopped" or "failed".
@@ -521,183 +541,11 @@ func (s *session) state() string {
 	}
 }
 
-// selection is the cells a drag picked, from its anchor to its focus.
-type selection struct {
-	on             bool
-	dragging       bool
-	ax, ay, fx, fy int
-}
-
-// begin starts a selection at a cell, or clears it when the press is a click.
-func (s *session) begin(x, y int) {
-	s.sel.on = true
-	s.sel.dragging = true
-	s.sel.ax, s.sel.ay = x, y
-	s.sel.fx, s.sel.fy = x, y
-}
-
-// extend moves the focus of a drag to a cell.
-func (s *session) extend(x, y int) {
-	s.sel.fx, s.sel.fy = x, y
-}
-
-// finish ends a drag, keeping a selection only if it covers a cell other than
-// the one pressed.
-func (s *session) finish() {
-	s.sel.dragging = false
-	if s.sel.ax == s.sel.fx && s.sel.ay == s.sel.fy {
-		s.sel.on = false
-	}
-}
-
-// clearSelection drops what was selected, as typing does.
-func (s *session) clearSelection() { s.sel = selection{} }
-
-// range is the selection from its first cell to its last, row by row, and
-// whether there is one.
-func (s *session) selRange() (x0, y0, x1, y1 int, ok bool) {
-	if !s.sel.on {
-		return 0, 0, 0, 0, false
-	}
-	x0, y0, x1, y1 = s.sel.ax, s.sel.ay, s.sel.fx, s.sel.fy
-	if y0 > y1 || (y0 == y1 && x0 > x1) {
-		x0, y0, x1, y1 = x1, y1, x0, y0
-	}
-	cols, rows := s.screen.Size()
-	x0, x1 = min(max(x0, 0), max(cols-1, 0)), min(max(x1, 0), max(cols-1, 0))
-	y0, y1 = min(max(y0, 0), max(rows-1, 0)), min(max(y1, 0), max(rows-1, 0))
-	return x0, y0, x1, y1, true
-}
-
-// selected reports whether a cell is inside the selection.
-func (s *session) selected(x, y int) bool {
-	x0, y0, x1, y1, ok := s.selRange()
-	if !ok || y < y0 || y > y1 {
-		return false
-	}
-	if y == y0 && x < x0 {
-		return false
-	}
-	if y == y1 && x > x1 {
-		return false
-	}
-	return true
-}
-
-// linkAt is the URL of the cell at x, y, empty when it links to nothing.
-func (s *session) linkAt(x, y int) string {
-	row := s.screen.Row(y)
-	if x < 0 || x >= len(row) {
-		return ""
-	}
-	return s.screen.LinkOf(row[x])
-}
-
-// wordRune reports whether a rune belongs to a word a double click selects:
-// letters, digits, and the punctuation of paths, URLs and flags.
-func wordRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("_-./~:@%+=?&#$", r)
-}
-
-// selectWordAt selects the word around a cell, as a double click does.
-func (s *session) selectWordAt(x, y int) {
-	row := s.screen.Row(y)
-	if y < 0 || y >= len(row) {
-		return
-	}
-	x = min(max(x, 0), len(row)-1)
-	at := func(i int) rune {
-		for _, r := range row[i].Text {
-			return r
-		}
-		return ' '
-	}
-	if !wordRune(at(x)) {
-		s.sel = selection{on: true, ax: x, ay: y, fx: x, fy: y}
-		return
-	}
-	start, end := x, x
-	for start > 0 && wordRune(at(start-1)) {
-		start--
-	}
-	for end < len(row)-1 && wordRune(at(end+1)) {
-		end++
-	}
-	s.sel = selection{on: true, ax: start, ay: y, fx: end, fy: y}
-}
-
-// selectLineAt selects the line of a cell, as a triple click does.
-func (s *session) selectLineAt(y int) {
-	cols, rows := s.screen.Size()
-	if y < 0 || y >= rows {
-		return
-	}
-	s.sel = selection{on: true, ax: 0, ay: y, fx: cols - 1, fy: y}
-}
-
-// mouseReporting is how the program at the pane wants the mouse, and whether
-// this event goes to it: Shift always selects text here instead.
-func (s *session) mouseReporting(ev ui.InputEvent) (vt.MouseState, bool) {
-	m := s.screen.Mouse()
-	if !s.alive || m.Mode == 0 || ev.Mods&ui.Shift != 0 {
-		return m, false
-	}
-	return m, true
-}
-
-// selectedText is what the selection holds, a line per row, its blanks at the
-// end left out, as copying a screen gives text.
-func (s *session) selectedText() string {
-	x0, y0, x1, y1, ok := s.selRange()
-	if !ok {
-		return ""
-	}
-	var out strings.Builder
-	for y := y0; y <= y1; y++ {
-		row := s.screen.Row(y)
-		start, end := 0, len(row)-1
-		if y == y0 {
-			start = x0
-		}
-		if y == y1 {
-			end = min(x1, len(row)-1)
-		}
-		var line strings.Builder
-		for x := start; x >= 0 && x <= end; x++ {
-			cell := row[x]
-			if cell.Width == 0 {
-				continue // the second half of a wide character
-			}
-			if cell.Text == "" {
-				line.WriteByte(' ')
-			} else {
-				line.WriteString(cell.Text)
-			}
-		}
-		out.WriteString(strings.TrimRight(line.String(), " "))
-		if y < y1 {
-			out.WriteByte('\n')
-		}
-	}
-	// A screen's last rows are usually empty; they do not end the copied
-	// text with newlines nobody wrote.
-	return strings.TrimRight(out.String(), "\n")
-}
-
-// selectAll selects the whole screen.
-func (s *session) selectAll() {
-	cols, rows := s.screen.Size()
-	s.sel = selection{on: true, ax: 0, ay: 0, fx: cols - 1, fy: rows - 1}
-}
-
-// statusText is what the pane's header adds beside its title: how far the view
-// is above the bottom of the scrollback.
+// statusText is what the pane's header adds beside its title: how far a
+// reporting program says its work is.
 func (s *session) statusText() string {
 	if s.reported && s.wordProgress >= 0 && (s.word == "working" || s.word == "blocked") {
 		return strconv.Itoa(s.wordProgress) + "%"
-	}
-	if n := s.screen.Scrolled(); n > 0 {
-		return "↑ " + strconv.Itoa(n)
 	}
 	return ""
 }

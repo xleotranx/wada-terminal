@@ -1,4 +1,4 @@
-package vt
+package status
 
 import (
 	"encoding/base64"
@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// report writes one OSC 7501 sequence to a screen.
-func report(t *testing.T, s *Screen, body string) {
+// report writes one OSC 7501 sequence to a stream.
+func report(t *testing.T, s *Stream, body string) {
 	t.Helper()
 	s.Write([]byte("\x1b]7501;" + body + "\x1b\\"))
 }
@@ -15,7 +15,7 @@ func report(t *testing.T, s *Screen, body string) {
 // TestStatusReportMinimal checks the one required key and the defaults of the
 // others, as the protocol defines them.
 func TestStatusReportMinimal(t *testing.T) {
-	s := New(40, 8)
+	s := &Stream{}
 	report(t, s, "state=idle")
 	if !s.Reported() {
 		t.Fatal("a program that reported is not marked as reported")
@@ -28,11 +28,11 @@ func TestStatusReportMinimal(t *testing.T) {
 		st.App != "" || st.Title != "" || st.Message != "" {
 		t.Fatalf("status = %+v, want a minimal idle record", st)
 	}
-	reports := s.TakeStatusReports()
+	reports := s.TakeReports()
 	if len(reports) != 1 || reports[0].State != "idle" {
 		t.Fatalf("reports = %+v, want the idle report", reports)
 	}
-	if again := s.TakeStatusReports(); len(again) != 0 {
+	if again := s.TakeReports(); len(again) != 0 {
 		t.Fatalf("the reports were not taken: %+v", again)
 	}
 }
@@ -40,7 +40,7 @@ func TestStatusReportMinimal(t *testing.T) {
 // TestStatusReportAllKeys checks every field, including the base64 text the
 // specification gives for people.
 func TestStatusReportAllKeys(t *testing.T) {
-	s := New(40, 8)
+	s := &Stream{}
 	report(t, s, "state=blocked:kind=permission:progress=42:id=tf/plan:app=terraform:"+
 		"title=UGxhbg==:msg=QXBwbHkgMyB0byBhZGQsIDEgdG8gY2hhbmdlLCAwIHRvIGRlc3Ryb3k/")
 	st, ok := s.Statuses()["tf/plan"]
@@ -67,9 +67,9 @@ func TestStatusReportAllKeys(t *testing.T) {
 // TestStatusReportQuery checks that a program can ask whether the terminal
 // speaks the protocol, and that asking is not reporting.
 func TestStatusReportQuery(t *testing.T) {
-	s := New(40, 8)
+	s := &Stream{}
 	s.Write([]byte("\x1b]7501;?\x1b\\"))
-	replies := s.TakeResponses()
+	replies := s.TakeReplies()
 	if len(replies) != 1 {
 		t.Fatalf("replies = %q, want one", replies)
 	}
@@ -86,7 +86,7 @@ func TestStatusReportQuery(t *testing.T) {
 // are skipped, the last value wins, and whitespace around keys and values is
 // allowed.
 func TestStatusReportForgiving(t *testing.T) {
-	s := New(40, 8)
+	s := &Stream{}
 	report(t, s, "garbage:=x:Bad=1:app=b@d:future=yes: state = working :\tapp=cargo\t:::")
 	st, ok := s.Status()
 	if !ok {
@@ -124,7 +124,7 @@ func TestStatusReportRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New(40, 8)
+			s := &Stream{}
 			report(t, s, tc.body)
 			if _, ok := s.Status(); ok {
 				t.Fatalf("the report %q was accepted", tc.body)
@@ -153,7 +153,7 @@ func TestStatusReportKindAndProgress(t *testing.T) {
 		{"state=working:progress=100", "", 100},
 	}
 	for _, tc := range cases {
-		s := New(40, 8)
+		s := &Stream{}
 		report(t, s, tc.body)
 		st, ok := s.Status()
 		if !ok {
@@ -168,7 +168,7 @@ func TestStatusReportKindAndProgress(t *testing.T) {
 // TestStatusReportClear checks that clear removes the addressed record and its
 // children, and that a clear without an id removes every record.
 func TestStatusReportClear(t *testing.T) {
-	s := New(40, 8)
+	s := &Stream{}
 	report(t, s, "state=working")
 	report(t, s, "state=working:id=deploy/us-east:app=aws")
 	report(t, s, "state=working:id=deploy/eu-west:app=aws")
@@ -198,7 +198,7 @@ func TestStatusReportClear(t *testing.T) {
 // TestStatusReportSplitAcrossWrites checks that the parser keeps an OSC 7501
 // sequence split between two reads.
 func TestStatusReportSplitAcrossWrites(t *testing.T) {
-	s := New(40, 8)
+	s := &Stream{}
 	s.Write([]byte("\x1b]7501;state=wor"))
 	s.Write([]byte("king:app=cargo\x1b\\"))
 	st, ok := s.Status()
@@ -207,16 +207,71 @@ func TestStatusReportSplitAcrossWrites(t *testing.T) {
 	}
 }
 
-// TestStatusReportDoesNotPaint checks that a report is not text on the screen.
-func TestStatusReportDoesNotPaint(t *testing.T) {
-	s := New(20, 4)
-	report(t, s, "state=working:app=cargo")
-	for y := 0; y < 4; y++ {
-		for _, cell := range s.Row(y) {
-			if cell.Text != "" {
-				t.Fatalf("the report painted %q at row %d", cell.Text, y)
-			}
-		}
+// TestStatusReportAfterUnterminatedStrings checks that a report still
+// arrives after a program's strings that a terminal ends early: pi marks its
+// cursor with an APC ended by BEL, and an ESC ends any string or OSC.
+func TestStatusReportAfterUnterminatedStrings(t *testing.T) {
+	s := &Stream{}
+	s.Write([]byte("> typed\x1b_pi:c\x07 more"))
+	s.Write([]byte("\x1bPnever ended\x1b[0m"))
+	s.Write([]byte("\x1b]0;title with no end\x1b]7501;state=working\x1b\\"))
+	if st, ok := s.Status(); !ok || st.State != "working" {
+		t.Fatalf("status = %+v, ok=%v; want working", st, ok)
+	}
+}
+
+// TestUTF8IsNotAControl checks that the continuation bytes of a character
+// (0x9b and 0x9d are two) start no sequence.
+func TestUTF8IsNotAControl(t *testing.T) {
+	s := &Stream{}
+	s.Write([]byte("\xe2\x80\x9b\xe2\x80\x9d 7501;state=working\x07"))
+	if s.Reported() {
+		t.Fatal("text with UTF-8 continuation bytes was read as a report")
+	}
+}
+
+// TestHyperlinkTargets checks that the targets of OSC 8 links are kept, and
+// the empty one that ends a link is not.
+func TestHyperlinkTargets(t *testing.T) {
+	s := &Stream{}
+	s.Write([]byte("\x1b]8;;https://one.example/a\x07One\x1b]8;;\x07 \x1b]8;id=2;https://two"))
+	s.Write([]byte(".example/b\x1b\\Two\x1b]8;;\x1b\\"))
+	links := s.TakeLinks()
+	if len(links) != 2 || links[0] != "https://one.example/a" || links[1] != "https://two.example/b" {
+		t.Fatalf("links = %q", links)
+	}
+	if again := s.TakeLinks(); len(again) != 0 {
+		t.Fatalf("the links were not taken: %q", again)
+	}
+}
+
+// TestBracketedPaste checks DECSET 2004 among other modes, and the resets
+// that clear it.
+func TestBracketedPaste(t *testing.T) {
+	s := &Stream{}
+	if s.Bracketed() {
+		t.Fatal("bracketed paste is on before a program asked")
+	}
+	s.Write([]byte("\x1b[?1049;20"))
+	s.Write([]byte("04h"))
+	if !s.Bracketed() {
+		t.Fatal("DECSET 1049;2004 did not turn bracketed paste on")
+	}
+	s.Write([]byte("\x1b[?2004l"))
+	if s.Bracketed() {
+		t.Fatal("DECRST 2004 did not turn it off")
+	}
+	s.Write([]byte("\x1b[?2004h\x1b[!p"))
+	if s.Bracketed() {
+		t.Fatal("a soft reset did not turn it off")
+	}
+	s.Write([]byte("\x1b[?2004h\x1bc"))
+	if s.Bracketed() {
+		t.Fatal("a full reset did not turn it off")
+	}
+	s.Write([]byte("\x1b[2004h"))
+	if s.Bracketed() {
+		t.Fatal("ANSI mode 2004 is not bracketed paste")
 	}
 }
 

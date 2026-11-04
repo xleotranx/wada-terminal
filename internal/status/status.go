@@ -1,4 +1,8 @@
-package vt
+// Package status reads the Program Status Protocol (OSC 7501) out of what a
+// program writes to its terminal, and the one mode a window needs that the
+// terminal emulator does not report: whether the program asked for bracketed
+// paste. It parses no screen; the terminal emulator does that.
+package status
 
 import (
 	"encoding/base64"
@@ -31,12 +35,14 @@ const (
 	statusMaxMsgEncoded   = 2732
 	// statusMaxApp, statusMaxID, statusMaxIDSegment and statusMaxIDDepth
 	// bound the names a program reports.
-	statusMaxApp        = 32
-	statusMaxID         = 128
-	statusMaxIDSegment  = 32
-	statusMaxIDDepth    = 8
-	statusMaxKey        = 16
-	statusQueryReply    = "\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\"
+	statusMaxApp       = 32
+	statusMaxID        = 128
+	statusMaxIDSegment = 32
+	statusMaxIDDepth   = 8
+	statusMaxKey       = 16
+	// QueryReply answers a program that asks which states the terminal
+	// knows (OSC 7501 ; ?).
+	QueryReply          = "\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\"
 	statusNameBytes     = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.+-"
 	statusValueAlphabet = statusNameBytes + ",/="
 )
@@ -235,70 +241,4 @@ func decodeStatusText(encoded string, limit int) (string, bool) {
 		}
 	}
 	return string(raw), true
-}
-
-// applyStatus stores one report, replacing its record, and queues it for the
-// window. The store is the terminal's own state, so a program's report
-// survives as long as the screen it was made on.
-func (s *Screen) applyStatus(st Status) {
-	s.reported = true
-	s.pendingStatus = append(s.pendingStatus, st)
-	switch {
-	case st.Clear() && st.ID == "":
-		s.status = nil
-		s.statuses = nil
-	case st.Clear():
-		if s.status != nil && s.status.ID == st.ID {
-			s.status = nil
-		}
-		delete(s.statuses, st.ID)
-		child := st.ID + "/"
-		for id := range s.statuses {
-			if strings.HasPrefix(id, child) {
-				delete(s.statuses, id)
-			}
-		}
-	case st.ID == "":
-		root := st
-		s.status = &root
-	default:
-		if s.statuses == nil {
-			s.statuses = map[string]Status{}
-		}
-		s.statuses[st.ID] = st
-	}
-}
-
-// Status is the program's own status record, if it reported one.
-func (s *Screen) Status() (Status, bool) {
-	if s.status == nil {
-		return Status{}, false
-	}
-	return *s.status, true
-}
-
-// Statuses is a copy of the records the program reported for parts of its
-// work, by id. The program's own record is Status, not an entry here.
-func (s *Screen) Statuses() map[string]Status {
-	if len(s.statuses) == 0 {
-		return nil
-	}
-	out := make(map[string]Status, len(s.statuses))
-	for id, st := range s.statuses {
-		out[id] = st
-	}
-	return out
-}
-
-// Reported reports whether the program ever sent a status report. A program
-// that has not is not an agent to the window, however busy its screen looks.
-func (s *Screen) Reported() bool { return s.reported }
-
-// TakeStatusReports returns the reports received since the last call, in
-// order, and forgets them. The window applies the state transitions only
-// once, even though the records stay on the screen.
-func (s *Screen) TakeStatusReports() []Status {
-	reports := s.pendingStatus
-	s.pendingStatus = nil
-	return reports
 }

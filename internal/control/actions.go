@@ -95,6 +95,11 @@ var Actions = []Action{
 			{Name: "text", Type: "string", Required: true, Description: "The text; no keys or escapes, send those with the program's own protocol."},
 			{Name: "submit", Type: "bool", Description: "Press Return after the text; default true.", Default: true},
 		}},
+	{Name: "terminal.read", Description: "Read the text a pane shows: its scrollback and screen, wrapped lines joined, or only their last lines.",
+		Args: []Arg{
+			{Name: "pane", Type: "int", Description: "The pane's id; default the focused one."},
+			{Name: "lines", Type: "int", Description: "How many of the last lines; default all."},
+		}},
 	{Name: "index.open", Description: "Open the Sessions."},
 	{Name: "index.close", Description: "Close the Sessions."},
 }

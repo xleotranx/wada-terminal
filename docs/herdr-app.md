@@ -51,14 +51,14 @@ and machines**, **the interface as files**, **mods**, and **the layout tree**.
 | herdr-app | Wada Terminal now |
 | --- | --- |
 | `herdr-core` owns terminals and outlives the window | Yes: `internal/core` runs programs on pseudo-terminals, keeps their screens, and survives the window. A detached process started from the app's own executable. |
-| The window attaches to a live terminal and reattaches after a restart | Yes: the core sends a gob snapshot of the screen, then streams output; the app mirrors it. The saved layout names each pane's terminal. |
+| The window attaches to a live terminal and reattaches after a restart | Yes: the core sends frames of its terminal (`terminal.Mirror`), the first starting the pane's terminal over; the pane shows them cell for cell. The saved layout names each pane's terminal. |
 | A terminal that was lost (core restart, reboot) gets a shell in its folder | Yes. The saved core instance tells the window whether the ids it has still mean what they meant. |
-| OSC 7501 status, stored as reported | Yes: `internal/vt/status.go` parses and stores records; `protocol.go` applies the seen rule; the pane, index, sidebar and the core's records show the report. |
+| OSC 7501 status, stored as reported | Yes: `internal/status` parses and stores records; `protocol.go` applies the seen rule; the pane, index, sidebar and the core's records show the report. |
 | A program that reports is an agent, whatever its name | Yes. A shell that prints a 7501 report becomes an agent; an agent name is no longer required. |
 | Programs and agents from a manifest | Partly: `agents.json`, and `programs.json` entries with `run`, add programs to the Session menu with argv, glyph, color, an SVG icon and `tint`; the window treats them as agents. A `match` list adopts an agent by its real foreground process on local and remote panes, falling back to the terminal title; core terminals report their foreground process through `core ls` and the Machines panel. |
-| Find in a pane's scrollback | Yes: `⌘F` opens a find bar over the focused pane; search is case-insensitive over history and the live grid, highlights matches, and `↑`/`↓`/Return scroll to them. |
-| A vi-like scroll mode | Partly: `⌃⇧Space` enters a mode where `j`/`k`, arrows, `g`/`G`, Page keys and `/` navigate history; `v` starts a character-wise selection (`h`/`l`, `w`/`b`/`e`, `0`/`$` move within it), `V` selects whole lines, `y` copies, `p` pastes into the program, `d` clears the selection, and `q`/Esc leaves; terminal text is never deleted. |
-| Links before opening | Yes: OSC 8 links are underlined and click to open; hovering shows the URL in a pane-foot bar, and `⌘⇧L` lists every URL on the focused screen and its scrollback with keyboard choice. |
+| Find in a pane's scrollback | Yes: `⌘F` opens a find bar over the focused pane; the pane's terminal searches history and the screen, highlights matches, and `↑`/`↓`/Return scroll to them. |
+| A vi-like scroll mode | No: the pointer, the wheel, `⇧PageUp`/`⇧PageDown` and the find bar move through the scrollback. |
+| Links before opening | Yes: `⌘`-click opens an OSC 8 link or a printed URL, and `⌘⇧L` lists the program's hyperlinks and the URLs on the focused pane and its scrollback with keyboard choice. |
 | Unreported programs have no status | Not quite: Wada Terminal keeps its screen-reading fallback for programs that never report. Once one reports, the fallback is off for good. |
 | `herdr-app status/ls/commands/do` over a local socket | Yes: `internal/control` holds the protocol and action list; `internal/plugins/terminal/control.go` serves it; `internal/cli` is the command. |
 | `herdr-app skill` writes the agent guide | Yes: `wada-terminal skill` prints `internal/cli/skill.md`. |
@@ -72,24 +72,32 @@ and machines**, **the interface as files**, **mods**, and **the layout tree**.
 ### The core
 
 `internal/core` is a Unix-socket server. It owns each program on a
-pseudo-terminal together with a `vt.Screen`, answers the queries that program
-asks, and keeps the screen up to date while no window is attached. A window
+pseudo-terminal together with a headless MyGo terminal (Ghostty's emulator),
+which answers the queries that program asks and keeps the screen up to date
+while no window is attached. A window
 starts it through `core.Ensure`: if `core.sock` does not answer, the app runs
 its own executable with `--serve-core`, detached in a new session. The core
 writes `core.json` (its instance id and pid) and `core.log` beside the socket.
 
 Attaching is a framed binary stream, not JSON:
 
-1. the viewer sends `{"method":"attach","terminal":7,...}` and its size;
-2. the core sends a gob-encoded `vt.Snapshot`, the whole screen including
-   scrollback, modes and OSC 7501 records;
-3. the core streams the program's output; the viewer sends input and resizes on
-   the same connection.
+1. the viewer sends `{"method":"attach","terminal":7,...}` with the size it
+   fits and its colors;
+2. the core sends the size its terminal took, an `Info` (the program's title,
+   directory, OSC 7501 record, bracketed paste mode and hyperlinks), and the
+   first frame of a `terminal.Mirror`, which starts the viewer's terminal over
+   from the screen and scrollback as they are;
+3. the core sends frames as the program draws, a new size before the frames
+   drawn at it, and an `Info` when what it holds changes; the viewer sends
+   input, the size it fits, its colors and the user's clears on the same
+   connection.
 
-The app mirrors the screen with the same `vt.Screen` it paints. It does not
-answer the program's queries; the core does, once, so a program never waits on
-a window that is closed. If an attach connection breaks while the program
-lives, the window attaches again and replaces its mirror with a fresh snapshot.
+The pane's terminal reads the stream as its `Conn` and takes the core's sizes
+(`ResizeByConn`): it never lays out the program's output itself, so it cannot
+come to show something else. It does not answer the program's queries; the
+core does, once, so a program never waits on a window that is closed. If an
+attach connection breaks while the program lives, the stream attaches again,
+and its first frame starts the pane over.
 
 The window saves its spaces, tabs, splits, focus, and each pane's core terminal
 id in the `terminal` plugin's `workspaces` setting. It also saves the core
@@ -155,7 +163,7 @@ guide written into a user's folder.
 
 ![A fake agent reporting blocked over OSC 7501: the pane and the index both show its label and message](images/protocol.png)
 
-`internal/vt/status.go` implements the protocol's limits and validation:
+`internal/status` implements the protocol's limits and validation:
 
 - a report replaces its record; the record without an `id` is the program's
   own, and an `id` with slashes is a child of another;

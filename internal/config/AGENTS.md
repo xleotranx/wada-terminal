@@ -411,7 +411,6 @@ command in the menu without a shortcut.
   "split-right": ["cmd+d", "ctrl+shift+d"],
   "find": "cmd+f",
   "links": "cmd+shift+l",
-  "scroll-mode": "ctrl+shift+space",
   "index": "cmd+shift+i"
 }
 ```

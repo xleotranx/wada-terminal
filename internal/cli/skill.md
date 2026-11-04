@@ -25,6 +25,7 @@ wada-terminal do tab.new --kind claude --folder /path/to/repo
 wada-terminal do pane.split --direction right --kind shell --pane 4
 wada-terminal do pane.focus --pane 4
 wada-terminal do terminal.send --terminal 4 --text "run the tests"
+wada-terminal do terminal.read --pane 4 --lines 40
 ```
 
 `do` takes named arguments or one JSON object:

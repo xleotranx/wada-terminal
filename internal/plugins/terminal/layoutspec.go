@@ -7,7 +7,6 @@ import (
 	"wada-terminal/internal/config"
 	"wada-terminal/internal/core"
 	"wada-terminal/internal/tasks"
-	"wada-terminal/internal/vt"
 )
 
 // workspaceSpec is what the window saves of a workspace between runs: its
@@ -250,8 +249,8 @@ func (t *Plugin) attachRecord(rec core.Record, machine string, client *core.Clie
 	}
 	s := &session{t: t, id: t.nextID, kind: k, dir: rec.Dir, cols: cols, rows: rows,
 		machine: machine, client: client,
-		screen: vt.New(cols, rows), alive: true, name: sp.name, detail: sp.detail,
-		mouseBtn: -1, seen: true, wordProgress: -1}
+		alive: true, name: sp.name, detail: sp.detail,
+		seen: true, wordProgress: -1}
 	t.nextID++
 	if rec.Name != "" {
 		s.name = rec.Name

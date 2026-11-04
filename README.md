@@ -93,19 +93,12 @@ workspace menu, so a capture can show a split, the index or the menu), and
   chosen first — an agent waiting on an approval, then one that finished while
   you were elsewhere — and `↑` `↓` then Return gives it the keyboard; `esc`
   closes the index.
-- **Scroll mode** — `⌃⇧Space` takes the keyboard from the program for the
-  focused pane: `j`/`k` or the arrows move through history, `g`/`G` go to the
-  ends, Page keys page, `/` opens find, and `q` or Esc returns to the live
-  screen. `v` starts a character-wise visual selection (`h`/`l`, `j`/`k`,
-  `w`/`b`/`e` and `0`/`$` move within it), `V` selects whole lines, `y`
-  copies, `p` pastes the clipboard into the program and returns to the live
-  screen, and `d` drops the selection (scrollback is read-only). A
-  `SCROLL`/`VISUAL` badge marks the mode.
 - **Find in scrollback** — `⌘F` opens a find bar over the focused pane.
-  Search is case-insensitive over the screen and its history, matches are
-  highlighted, `↑`/`↓` or Return cycle and scroll to each one, and `⌘F` closes
-  it again. The query runs on the core's screen, so it sees what the program
-  printed even while the window was closed.
+  Search is case-insensitive for ASCII letters, over the screen and its
+  history; matches are highlighted as they are found, Return or `↑` selects the
+  next one up the scrollback and `↓` the next one down, each scrolled into
+  view, and `⌘F` closes it again. The pane's terminal holds what the core's
+  holds, so it sees what the program printed while the window was closed.
 - **State at a glance** — an agent's dot is green while it works, amber when it
   waits for an answer, blue when it finished unseen, and grey at its prompt;
   the title bar counts what needs you, and a pane's header names its state.
@@ -123,8 +116,9 @@ workspace menu, so a capture can show a split, the index or the menu), and
   guide for an agent; `commands` lists every action without opening a window.
 - **Close it, they keep working** — the programs belong to a core process, not
   the window. The core owns the pseudo-terminals and screens, answers a
-  program's queries when no window is attached, and keeps the scrollback. The
-  window attaches to a snapshot, streams the output, and saves each pane's
+  program's queries when no window is attached, and keeps the scrollback. A
+  window's pane shows frames of the core's terminal, cell for cell, and never
+  lays out the program's output itself; it saves each pane's
   terminal id and the core instance with its layout; a reopened window
   reattaches, while a terminal the core lost comes back as a shell in its last
   folder.
@@ -187,58 +181,43 @@ workspace menu, so a capture can show a split, the index or the menu), and
   `templates/<name>.md` (a command, readiness, submit key and instructions) let
   `core run --template reviewer "Review src/x.go"` start a role and send its
   first message when it is ready.
-- **Real terminals** — each pane runs a program on a pseudo-terminal, with
-  `TERM=xterm-256color`, the alternate screen, 256-color and 24-bit color,
-  scrollback, the cursor, and `SIGWINCH` as the pane resizes. The terminal
-  answers what a program asks — its device attributes, the cursor's position,
-  and the foreground and background colors of the pane (OSC 10 and 11) — so a
-  program that adapts to a light or dark terminal sees this one.
-- **The mouse, when a program asks** — X10, normal, button-event and any-event
-  tracking (modes 9, 1000, 1002, 1003) in the SGR, urxvt and classic encodings:
-  clicks, drags and the wheel go to the program. Hold Shift to select text
-  instead, as other terminals allow.
+- **Real terminals** — each pane runs a program on a pseudo-terminal and shows
+  it with [MyGo's terminal](https://github.com/egoist/mygo), whose emulator is
+  Ghostty's (libghostty-vt): `TERM=xterm-256color`, 256-color and 24-bit
+  color, the alternate screen, Unicode with wide characters and emoji,
+  synchronized output, the Kitty keyboard protocol, input methods, and a
+  scrollback that reflows as the pane resizes. It answers what a program asks
+  — its device attributes, the cursor's position, and the pane's colors (OSC
+  4, 10, 11) — so a program that adapts to a light or dark terminal sees this
+  one. Box drawing, blocks and Powerline's separators are drawn rather than
+  taken from the font, so borders join; a Nerd Font, when one is installed,
+  joins the font list for the icons programs print.
+- **The mouse, when a program asks** — clicks, drags and the wheel go to a
+  program that takes the mouse; hold Shift to select text instead.
 - **Select and copy** — drag over cells to select them, double-click a word or
-  triple-click a line, then `⌘C` (the Edit menu's Copy) or `⌘⇧C`; `⌘⇧A` selects
-  the screen. `⌘V` pastes.
-- **Links** — hyperlinks a program prints with OSC 8 are underlined, the pointer
-  says so, and hovering shows the URL in a small bar at the pane's foot before a
-  click opens it. `⌘⇧L` opens a link picker listing every URL on the pane and in
-  its scrollback.
-- **Art and borders that tile** — the half and quarter blocks a program draws
-  its wordmarks with, and the box-drawing characters it draws borders with, are
-  painted as rectangles and lines on the cell grid, not as font glyphs, so a
-  logo has no seams and a `┼` joins its neighbours exactly. A Nerd Font, when
-  one is installed, joins the font list for the icons programs print. The
-  cursor is a two-pixel bar at the cell's edge rather than a block, which
-  leaves a program's colors readable; it is painted over the character under
-  it, so an agent's input caret shows even when the program puts it on a
-  placeholder's first letter. A run of reversed blanks keeps its background
-  too, which is how Pi draws a cursor of its own.
-- **Reflow on resize** — narrowing or widening the window wraps the lines the
-  program wrote again at the new width, keeping the cursor at its place in its
-  line; lines a shorter window has no room for scroll into the scrollback. A
-  full-screen program on the alternate screen is cropped instead, since it
-  redraws.
+  triple-click a line, then `⌘C`; `⌘A` selects everything. `⌘V` pastes, and
+  the context menu has Copy, Paste, Select All and Clear. The wheel and
+  `⇧PageUp`/`⇧PageDown` scroll the scrollback; typing returns to the bottom.
+- **Links** — `⌘`-click opens a hyperlink a program printed (OSC 8) or a URL
+  printed as text. `⌘⇧L` opens a link picker listing the hyperlinks the
+  program printed and the URLs on the pane and in its scrollback.
 - **Agents as first-class sessions** — Claude Code, Codex, OpenCode, a shell,
   or any program that reports over OSC 7501; the pane header shows the
   program's own window title, its reported label and message, and its working
   directory, and the Sessions follows each agent from working to waiting to
   done.
-- **Font** — `⌘=` and `⌘-` change the terminal's text size; the grid is measured
-  from the monospaced font, so panes stay aligned as they resize.
+- **Font** — `⌘=` and `⌘-` change every pane's text size, as does the wheel
+  with `⌘` held over a pane; `⌘0` sets it back.
 
 ![The Sessions: every session in one list, with the blocked agent chosen](docs/images/sessions.png)
 
 ## Known gaps
 
-- A selection follows the cells it covers, not the text behind them: new output
-  under it moves what it holds.
-- Scroll mode is a small vi subset (`j`/`k`, `g`/`G`, arrows, Page keys,
-  `q`/Esc); visual selection is character- and line-wise with word and line
-  motions, a paste (`p`) and clear-selection (`d`); terminal text is never
-  deleted. A link opens on a click,
-  not a command-click; the Links picker lists URLs but hovering does not
-  preview one.
+- There is no keyboard mode for moving through the scrollback and selecting
+  text: the pointer, the wheel and the find bar do it.
+- The link picker's hyperlinks are those the program printed since its pane's
+  terminal started, up to the last 200, whether or not they are still on
+  screen; hovering a link does not preview it.
 - Icons a program takes from a Nerd Font show as boxes when no such font is
   installed; the window uses one if the system has it.
 - After a core restart, reboot or crash, a saved pane comes back as a shell in
@@ -279,10 +258,10 @@ workspace menu, so a capture can show a split, the index or the menu), and
 | `internal/cli` | The app's command line, the core command line (`core.go`), `config`, `shot`, and the guide `skill` prints |
 | `internal/config` | The interface files: settings, keys, layout, themes, machines, mods, their defaults and the installed `AGENTS.md` |
 | `internal/plugins/terminal/config.go` | Loading those files, the reload watcher, and the last-good-on-error rules |
-| `internal/core` | The persistent core: PTYs, screens, OSC 7501 state, attach snapshots, its socket and its launcher |
+| `internal/core` | The persistent core: PTYs, each program's headless MyGo terminal, OSC 7501 state, the frames a window attaches to, its socket and its launcher |
 | `internal/appdir` | The data folder rule shared by the window, the core and the command line |
 | `internal/plugins/terminal/agents.go` | Agent state — working, waiting, done, idle — and the quiet watcher that settles it |
-| `internal/vt` | A VT100/xterm screen emulator: parses what a program writes and answers the cells to paint |
+| `internal/status` | Reads OSC 7501 reports, bracketed paste and hyperlink targets out of a program's output, which the emulator does not report |
 | `internal/pty` | A program on a pseudo-terminal: start, read, write, resize, signal |
 
 The research and design behind the index, measured against [herdr](https://github.com/herdrdev/herdr),

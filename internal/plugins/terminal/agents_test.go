@@ -2,17 +2,46 @@ package terminal
 
 import (
 	"fmt"
+	"io"
 	"testing"
 
-	"wada-terminal/internal/vt"
+	mterm "github.com/egoist/mygo/plugins/terminal"
 )
 
-// testSession is a session with a screen but no program: enough to read the
-// Sessions's state and its screen.
+// testSession is a session with no program and no terminal: enough to read
+// the Sessions's state.
 func testSession(k kind, id int) *session {
 	sp := k.spec()
 	return &session{id: id, kind: k, name: sp.name, detail: sp.detail, alive: true,
-		cols: 60, rows: 12, screen: vt.New(60, 12), wordProgress: -1}
+		cols: 60, rows: 12, wordProgress: -1}
+}
+
+// idleConn is a terminal's Conn with nothing to read: a test feeds the
+// terminal instead.
+type idleConn struct{ closed chan struct{} }
+
+func (c idleConn) Read([]byte) (int, error)    { <-c.closed; return 0, io.EOF }
+func (c idleConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c idleConn) Close() error                { close(c.closed); return nil }
+
+// screenOf is a terminal of the given size that was shown text, as a program
+// writes it.
+func screenOf(t *testing.T, cols, rows int, text string) *mterm.Terminal {
+	t.Helper()
+	term, err := mterm.New(mterm.Options{Conn: idleConn{closed: make(chan struct{})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = term.Close() })
+	term.Resize(cols, rows)
+	term.Feed([]byte(text))
+	return term
+}
+
+// show gives a session a terminal that shows text.
+func show(t *testing.T, s *session, text string) {
+	t.Helper()
+	s.term = screenOf(t, s.cols, s.rows, text)
 }
 
 // TestBlockedOnApprovalPrompt checks that an approval with a cursor on it is
@@ -46,9 +75,8 @@ func TestBlockedOnApprovalPrompt(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			screen := vt.New(60, 12)
-			screen.Write([]byte(tc.screen))
-			if got := blockedOnScreen(screen); got != tc.want {
+			text := screenOf(t, 60, 12, tc.screen).Text()
+			if got := blockedOnScreen(screenTail(text, 12)); got != tc.want {
 				t.Fatalf("blockedOnScreen() = %v, want %v for screen:\n%s", got, tc.want, tc.screen)
 			}
 		})
@@ -60,7 +88,7 @@ func TestBlockedOnApprovalPrompt(t *testing.T) {
 // another pane is done, and an approval is blocked.
 func TestSettleClassifiesAnAgent(t *testing.T) {
 	s := testSession(kindClaude, 1)
-	s.screen.Write([]byte("Ready.\r\n> \r\n"))
+	show(t, s, "Ready.\r\n> \r\n")
 	s.busy, s.asked = true, true
 	if !s.settle(false) || s.agentState() != agentDone {
 		t.Fatalf("a quiet agent away from the keyboard is %v, want done", s.agentState())
@@ -70,7 +98,7 @@ func TestSettleClassifiesAnAgent(t *testing.T) {
 	}
 
 	s = testSession(kindCodex, 2)
-	s.screen.Write([]byte("Ready.\r\n> \r\n"))
+	show(t, s, "Ready.\r\n> \r\n")
 	s.busy, s.asked = true, true
 	s.settle(true)
 	if s.agentState() != agentIdle || s.asked || s.done {
@@ -78,7 +106,7 @@ func TestSettleClassifiesAnAgent(t *testing.T) {
 	}
 
 	s = testSession(kindClaude, 3)
-	s.screen.Write([]byte("Allow this command?\r\n❯ 1. Yes\r\n  2. No\r\n"))
+	show(t, s, "Allow this command?\r\n❯ 1. Yes\r\n  2. No\r\n")
 	s.busy, s.asked = true, true
 	s.settle(false)
 	if s.agentState() != agentBlocked {
@@ -183,36 +211,26 @@ func TestSeenClearsADoneAgent(t *testing.T) {
 	}
 }
 
-// TestScreenTailReadsTheBottom checks that the state machine reads the live
-// bottom of a screen, not its scrollback.
+// TestScreenTailReadsTheBottom checks that the state machine reads the last
+// lines the program drew, top line first.
 func TestScreenTailReadsTheBottom(t *testing.T) {
-	screen := vt.New(40, 5)
-	screen.Write([]byte("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n"))
-	tail := screenTail(screen, 3)
+	text := screenOf(t, 40, 5, "one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n").Text()
+	tail := screenTail(text, 3)
 	want := []string{"four", "five", "six"}
-	if len(tail) != len(want) {
+	if fmt.Sprint(tail) != fmt.Sprint(want) {
 		t.Fatalf("screenTail() = %q, want %q", tail, want)
-	}
-	for i := range want {
-		if tail[i] != want[i] {
-			t.Fatalf("screenTail() = %q, want %q", tail, want)
-		}
 	}
 }
 
-// TestScreenTailReadsTheLiveBottom checks that the state machine reads what
-// the program last drew even when the user has scrolled the pane back.
-func TestScreenTailReadsTheLiveBottom(t *testing.T) {
-	screen := vt.New(30, 5)
+// TestScreenTailSkipsBlankRows checks that the empty rows under a prompt do
+// not count against the lines read.
+func TestScreenTailSkipsBlankRows(t *testing.T) {
+	term := screenOf(t, 30, 8, "")
 	for i := 0; i < 12; i++ {
-		screen.Write([]byte(fmt.Sprintf("line %d\r\n", i)))
+		term.Feed([]byte(fmt.Sprintf("line %d\r\n\r\n", i)))
 	}
-	screen.Scroll(4)
-	if screen.Scrolled() == 0 {
-		t.Fatal("the test did not scroll the screen")
-	}
-	tail := screenTail(screen, 1)
-	if len(tail) != 1 || tail[0] != "line 11" {
-		t.Fatalf("screenTail() = %q, want the live bottom line 11", tail)
+	tail := screenTail(term.Text(), 2)
+	if fmt.Sprint(tail) != fmt.Sprint([]string{"line 10", "line 11"}) {
+		t.Fatalf("screenTail() = %q, want the last two lines", tail)
 	}
 }

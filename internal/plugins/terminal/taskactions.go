@@ -212,11 +212,11 @@ func (s *session) writeTaskInput(b []byte) error {
 		return fmt.Errorf("the selected terminal is not running")
 	}
 	if s.remote {
-		stream := s.currentStream()
-		if stream == nil {
+		if s.stream == nil {
 			return fmt.Errorf("the terminal is disconnected")
 		}
-		return stream.Input(b)
+		_, err := s.stream.Write(b)
+		return err
 	}
 	if s.proc == nil {
 		return fmt.Errorf("the terminal is unavailable")
@@ -277,7 +277,7 @@ func (t *Plugin) sendTask(w *workspace) error {
 		return fmt.Errorf("select a running agent terminal")
 	}
 	s := w.focus
-	prompt, err := taskPrompt(*w.task, s.screen != nil && s.screen.BracketedPaste())
+	prompt, err := taskPrompt(*w.task, s.bracketed)
 	if err != nil {
 		return err
 	}

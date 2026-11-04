@@ -15,7 +15,7 @@ func TestNormalizeKeys(t *testing.T) {
 	overrides, err := normalizeKeys(config.Keys{
 		"terminal.new-tab": {"ctrl+t"},
 		"index":            {"cmd+shift+i"},
-		"copy":             {},
+		"find":             {},
 	}, specs)
 	if err != nil {
 		t.Fatal(err)
@@ -23,8 +23,8 @@ func TestNormalizeKeys(t *testing.T) {
 	if got := overrides["new-tab"]; len(got) != 1 || got[0] != "ctrl+t" {
 		t.Fatalf("new-tab = %v", got)
 	}
-	if got := overrides["copy"]; got == nil || len(got) != 0 {
-		t.Fatalf("copy = %v, want an empty binding", got)
+	if got := overrides["find"]; got == nil || len(got) != 0 {
+		t.Fatalf("find = %v, want an empty binding", got)
 	}
 	if _, err := normalizeKeys(config.Keys{"new-tab": {" "}}, specs); err == nil {
 		t.Fatal("a blank key was accepted")

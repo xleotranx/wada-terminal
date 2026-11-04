@@ -205,10 +205,7 @@ func (t *Plugin) controlPane(s *session) control.Pane {
 		ID: s.id, Kind: s.kind.apiName(), Title: s.title(), Detail: s.subtitle(),
 		Cwd: s.cwd(), Machine: s.machine, Focused: t.focused(s), Agent: s.isAgent(),
 		App: s.app, Word: s.statusWord(), Message: s.statusMsg, State: s.apiState(),
-		Cols: s.cols, Rows: s.rows, ScrollMode: s.scrollMode, Scrolled: s.screen.Scrolled(),
-		Visual: s.viVisual, VisualLinewise: s.viLinewise,
-		VisualFrom: min(s.viAnchor, s.viCursor), VisualTo: max(s.viAnchor, s.viCursor),
-		VisualFromCol: visualFromCol(s), VisualToCol: s.viCursorCol,
+		Cols: s.cols, Rows: s.rows,
 	}
 	if s.reported && s.wordProgress >= 0 && (s.word == "working" || s.word == "blocked") {
 		pane.Progress = s.wordProgress
@@ -511,6 +508,18 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		s.write([]byte(text))
 		return map[string]any{"pane": s.id, "bytes": len(text)}, nil
 
+	case "terminal.read":
+		s, err := t.paneFrom(args)
+		if err != nil {
+			return nil, err
+		}
+		text := strings.TrimRight(s.screenText(), "\n")
+		if n, ok := control.Int(args, "lines"); ok && n > 0 {
+			lines := strings.Split(text, "\n")
+			text = strings.Join(lines[max(len(lines)-n, 0):], "\n")
+		}
+		return map[string]any{"pane": s.id, "text": text}, nil
+
 	case "index.open":
 		t.openIndex()
 		return map[string]any{"open": true}, nil
@@ -646,13 +655,4 @@ func (s *session) apiState() string {
 	default:
 		return "idle"
 	}
-}
-
-// visualFromCol is the anchor's column, swapped with the cursor's when the
-// selection runs upwards or backwards.
-func visualFromCol(s *session) int {
-	if s.viAnchor > s.viCursor || (s.viAnchor == s.viCursor && s.viAnchorCol > s.viCursorCol) {
-		return s.viCursorCol
-	}
-	return s.viAnchorCol
 }

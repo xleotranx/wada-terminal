@@ -23,6 +23,7 @@ import (
 	"github.com/xleotranx/wada-kit/kernel"
 
 	"github.com/egoist/mygo"
+	mterm "github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 	"github.com/oneo-me/onevra/source/components"
 )
@@ -136,13 +137,17 @@ type Plugin struct {
 	agentWake     chan struct{}
 	agentWatching atomic.Bool
 
-	// cell is the size of one cell at cellFont, measured once a font, and
-	// family is the family list the cells paint with, worked out once.
-	cellFont float64
-	cellW    float32
-	cellH    float32
-	family   string
+	// family is the family list the terminals paint with, worked out once.
+	family string
+
+	// paneFocusAsked is the pane last given the keyboard, and overlayWasOpen
+	// whether an overlay held it in the last frame (noteOverlay).
+	paneFocusAsked *session
+	overlayWasOpen bool
 }
+
+// defaultFontSize is the terminals' text size until the user zooms.
+const defaultFontSize = 12.5
 
 // New makes the terminal plugin.
 func New() kernel.Plugin { return &Plugin{} }
@@ -159,7 +164,7 @@ func (t *Plugin) Setup(c *kernel.Context) error {
 	t.ctx = c
 	t.host = kernel.Require(c, shell.HostKey)
 	t.sidebar = kernel.NewSetting(c, "sidebar", true)
-	t.font = kernel.NewSetting(c, "font-size", 12.5)
+	t.font = kernel.NewSetting(c, "font-size", defaultFontSize)
 	t.saved = kernel.NewSetting(c, "workspaces", []workspaceSpec{})
 	t.savedInstance = kernel.NewSetting(c, "core-instance", "")
 	t.savedInstances = kernel.NewSetting(c, "machine-instances", map[string]string{})
@@ -322,16 +327,13 @@ func (t *Plugin) commandSpecs() []commandSpec {
 		{"opencode", 22, "New OpenCode Session", "Session", nil, func() { t.newTab(kindOpenCode) }},
 		{"shell", 23, "New Shell Session", "Session", nil, func() { t.newTab(kindShell) }},
 		{"restart", 24, "Restart Pane", "Session", nil, t.restartFocused},
-		{"copy", 30, "Copy Selection", "", []string{"cmd+shift+c"}, t.copySelection},
-		{"select-all", 31, "Select All", "", []string{"cmd+shift+a"}, t.selectAll},
 		{"sidebar", 40, "Toggle Sidebar", "View", []string{"cmd+b"}, t.toggleSidebar},
 		{"task-inbox", 39, "Tasks", "View", []string{"cmd+shift+j"}, t.openTaskInbox},
 		{"font-larger", 41, "Larger Text", "View", []string{"cmd+="}, func() { t.zoomFont(1) }},
 		{"font-smaller", 42, "Smaller Text", "View", []string{"cmd+-"}, func() { t.zoomFont(-1) }},
-		{"font-reset", 43, "Actual Size", "View", []string{"cmd+0"}, func() { t.setFont(12.5) }},
+		{"font-reset", 43, "Actual Size", "View", []string{"cmd+0"}, func() { t.setFont(defaultFontSize) }},
 		{"find", 45, "Find…", "Edit", []string{"cmd+f"}, t.openSearch},
 		{"links", 47, "Links…", "View", []string{"cmd+shift+l"}, t.openLinks},
-		{"scroll-mode", 46, "Scroll Mode", "View", []string{"ctrl+shift+space"}, t.toggleScrollMode},
 		{"index", 44, "Sessions", "View", []string{"cmd+shift+i"}, t.openIndex},
 	}
 	for _, name := range t.agentDefs.AgentNames() {
@@ -885,8 +887,18 @@ func (t *Plugin) zoomFont(step int) {
 
 func (t *Plugin) setFont(size float64) {
 	t.font.Set(size)
-	t.cellFont = 0 // measure again
+	font := t.terminalFont()
+	for _, s := range t.allSessions() {
+		if s.term != nil {
+			s.term.SetFont(font)
+		}
+	}
 	t.ctx.Invalidate()
+}
+
+// terminalFont is the font every terminal shows its text in.
+func (t *Plugin) terminalFont() mterm.Font {
+	return mterm.Font{Family: t.fontFamily(), Size: float32(t.font.Get())}
 }
 
 // launchDir is the folder the app was started in, which is the first
@@ -904,22 +916,6 @@ func homeDir() string {
 		return home
 	}
 	return os.Getenv("HOME")
-}
-
-// copySelection puts what the focused pane has selected on the clipboard.
-func (t *Plugin) copySelection() {
-	if w := t.current; w != nil && w.focus != nil {
-		if text := w.focus.selectedText(); text != "" {
-			t.services.WriteClipboard(text)
-		}
-	}
-}
-
-// selectAll selects everything on the focused pane's screen.
-func (t *Plugin) selectAll() {
-	if w := t.current; w != nil && w.focus != nil {
-		w.focus.selectAll()
-	}
 }
 
 // dragDivider moves the divider of a split as the pointer drags it. The

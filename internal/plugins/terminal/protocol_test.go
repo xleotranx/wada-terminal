@@ -1,14 +1,17 @@
 package terminal
 
 import (
-	"strings"
 	"testing"
+
+	"wada-terminal/internal/status"
 )
 
-// report7501 feeds a session's screen one OSC 7501 report and applies it.
+// report7501 reads one OSC 7501 report out of a program's output, as a
+// session's reader does, and applies it.
 func report7501(s *session, body string) {
-	s.screen.Write([]byte("\x1b]7501;" + body + "\x1b\\"))
-	s.applyStatusReports()
+	var scan status.Stream
+	scan.Write([]byte("\x1b]7501;" + body + "\x1b\\"))
+	s.applyStatusReports(scan.TakeReports())
 }
 
 // TestProtocolIsBelievedOverTheScreen checks that a program which reports its
@@ -144,16 +147,5 @@ func TestProtocolSuppressesTheScreenWatcher(t *testing.T) {
 	s.settle(true)
 	if s.agentState() != agentWorking {
 		t.Fatalf("settle changed a reporting agent to %v", s.agentState())
-	}
-}
-
-// TestProtocolQueryIsAnswered checks the window answers a program that asks
-// whether OSC 7501 is supported.
-func TestProtocolQueryIsAnswered(t *testing.T) {
-	s := testSession(kindShell, 1)
-	s.screen.Write([]byte("\x1b]7501;?\x1b\\"))
-	replies := s.screen.TakeResponses()
-	if len(replies) != 1 || !strings.Contains(replies[0], "states=idle,working,done,blocked,error") {
-		t.Fatalf("replies = %q", replies)
 	}
 }

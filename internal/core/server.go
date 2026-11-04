@@ -2,9 +2,7 @@ package core
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/rand"
-	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -320,46 +318,33 @@ func (s *Server) dispatch(req Request) Response {
 	}
 }
 
-// attach joins one viewer to a terminal. The first frame is the screen; after
-// it the program's output follows, and the viewer's input comes back on the
-// same connection.
+// attach joins one viewer to a terminal. The first frames start the viewer's
+// terminal over at the size the terminal takes; frames of the screen follow
+// as the program draws, and the viewer's input, size and colors come back on
+// the same connection.
 func (s *Server) attach(conn net.Conn, reader *bufio.Reader, req Request) {
 	t := s.terminal(req.Terminal)
 	if t == nil {
 		_ = writeFrame(conn, frameExit, frameExitPayload(Exit{Error: fmt.Sprintf("no terminal %d", req.Terminal)}))
 		return
 	}
-	if req.Cols >= 2 && req.Rows >= 2 {
-		t.resize(req.Cols, req.Rows)
-	}
-	t.mu.Lock()
-	t.screen.SetColors(req.FgRGB, req.BgRGB)
-	t.mu.Unlock()
-	v := &viewer{conn: conn, wake: make(chan struct{}, 1), done: make(chan struct{})}
-	snap, ok := t.attachViewer(v)
-	if !ok {
-		_ = writeFrame(conn, frameExit, frameExitPayload(Exit{Error: "the program has ended"}))
+	v := newViewer(conn)
+	exit, err := t.attachViewer(v, req.Cols, req.Rows, req.Theme)
+	if err != nil {
+		_ = writeFrame(conn, frameExit, frameExitPayload(Exit{Error: err.Error()}))
 		return
 	}
-	var screen bytes.Buffer
-	if err := gob.NewEncoder(&screen).Encode(snap); err != nil {
-		t.detach(v)
-		v.close()
-		return
-	}
-	if err := writeFrame(conn, frameSnapshot, screen.Bytes()); err != nil {
-		t.detach(v)
-		v.close()
+	if exit != nil {
+		_ = writeFrame(conn, frameExit, frameExitPayload(*exit))
 		return
 	}
 	go func() {
-		t.readViewer(v, reader)
+		t.readViewer(reader)
 		t.detach(v)
-		v.close()
+		v.finish()
 	}()
-	t.writeViewer(v)
+	v.write()
 	t.detach(v)
-	v.close()
 }
 
 // exitNote tells a parent that a child it started ended, when the child asked

@@ -6,10 +6,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"wada-terminal/internal/vt"
+	mterm "github.com/egoist/mygo/plugins/terminal"
 )
 
 // TestMain lets this test binary act as the core process Ensure starts. A
@@ -66,24 +67,56 @@ func testCore(t *testing.T) (*Server, *Client) {
 	return server, client
 }
 
-// snapshotText is a snapshot's screen as plain text, rows joined by newlines.
-func snapshotText(snap vt.Snapshot) string {
-	var b strings.Builder
-	for y := 0; y < snap.Rows; y++ {
-		for x := 0; x < snap.Cols; x++ {
-			cell := snap.Main[y*snap.Cols+x]
-			if cell.Width == 0 {
-				continue
-			}
-			if cell.Text == "" {
-				b.WriteByte(' ')
-			} else {
-				b.WriteString(cell.Text)
-			}
-		}
-		b.WriteByte('\n')
+// view is a window's side of a stream: a terminal showing the core's frames,
+// as a pane does, and the Info frames that came beside them.
+type view struct {
+	term   *mterm.Terminal
+	stream *Stream
+	mu     sync.Mutex
+	infos  []Info
+}
+
+// attachView attaches a terminal to a core's terminal, as a window does.
+func attachView(t *testing.T, client *Client, id, cols, rows int) (*view, error) {
+	t.Helper()
+	stream, err := client.Attach(id, cols, rows, nil)
+	if err != nil {
+		return nil, err
 	}
-	return b.String()
+	v := &view{stream: stream}
+	stream.OnInfo = func(info Info) {
+		v.mu.Lock()
+		v.infos = append(v.infos, info)
+		v.mu.Unlock()
+	}
+	term, err := mterm.New(mterm.Options{Conn: stream, ResizeByConn: true})
+	if err != nil {
+		stream.Close()
+		t.Fatal(err)
+	}
+	term.Resize(stream.Cols, stream.Rows)
+	stream.OnResized = term.Resize
+	v.term = term
+	t.Cleanup(v.close)
+	return v, nil
+}
+
+func (v *view) close() {
+	v.term.Close()
+	v.stream.Close()
+}
+
+// text is what the view's terminal shows, with its scrollback.
+func (v *view) text() string { return v.term.Text() }
+
+// info is the first Info the stream carried, the program's record as it was.
+func (v *view) info() (Info, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if len(v.infos) == 0 {
+		return Info{}, false
+	}
+	return v.infos[0], true
 }
 
 // waitFor polls until cond is true or the test times out.
@@ -114,22 +147,14 @@ func TestCoreRunsListsAndAttaches(t *testing.T) {
 		t.Fatalf("record = %+v", rec)
 	}
 
-	var snap vt.Snapshot
-	waitFor(t, "the program's output", func() bool {
-		stream, s, err := client.Attach(rec.ID, 40, 10, [3]uint8{255, 255, 255}, [3]uint8{0, 0, 0})
-		if err != nil {
-			return false
-		}
-		defer stream.Close()
-		if !strings.Contains(snapshotText(s), "ready") {
-			return false
-		}
-		snap = s
-		return true
-	})
-	if snap.Cols != 40 || snap.Rows != 10 {
-		t.Fatalf("snapshot size = %dx%d", snap.Cols, snap.Rows)
+	v, err := attachView(t, client, rec.ID, 40, 10)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if cols, rows := v.term.Size(); cols != 40 || rows != 10 {
+		t.Fatalf("view size = %dx%d", cols, rows)
+	}
+	waitFor(t, "the program's output", func() bool { return strings.Contains(v.text(), "ready") })
 
 	list, err := client.List()
 	if err != nil {
@@ -153,36 +178,35 @@ func TestCoreStreamsInputAndResize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, _, err := client.Attach(rec.ID, 40, 10, [3]uint8{255, 255, 255}, [3]uint8{0, 0, 0})
+	v, err := attachView(t, client, rec.ID, 40, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Close()
-	if err := stream.Input([]byte("echo wada-core-test\r")); err != nil {
+	if _, err := v.stream.Write([]byte("echo wada-core-test\r")); err != nil {
 		t.Fatal(err)
 	}
-	var got strings.Builder
 	waitFor(t, "the shell's echo", func() bool {
-		data, exit, err := stream.Next()
-		if err != nil || exit != nil {
-			return false
-		}
-		got.Write(data)
-		return strings.Contains(got.String(), "wada-core-test")
+		return strings.Count(v.text(), "wada-core-test") >= 2 // the command and its output
 	})
 
-	if err := stream.Resize(52, 14); err != nil {
+	if err := v.stream.ResizePixels(52, 14, 8, 16); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the new size", func() bool {
 		list, err := client.List()
 		return err == nil && len(list.Terminals) == 1 && list.Terminals[0].Cols == 52 && list.Terminals[0].Rows == 14
 	})
+	// The core's terminal took the size, and the window's took it from the
+	// core, as frames of that size need.
+	waitFor(t, "the view to take the size", func() bool {
+		cols, rows := v.term.Size()
+		return cols == 52 && rows == 14
+	})
 }
 
-// TestSnapshotCarriesStatus checks that a window attaching after the fact sees
+// TestAttachCarriesStatus checks that a window attaching after the fact sees
 // the program's OSC 7501 record, not only its cells.
-func TestSnapshotCarriesStatus(t *testing.T) {
+func TestAttachCarriesStatus(t *testing.T) {
 	if !hasPTY() {
 		t.Skip("no pseudo-terminals on this machine")
 	}
@@ -193,13 +217,48 @@ func TestSnapshotCarriesStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the status report", func() bool {
-		stream, snap, err := client.Attach(rec.ID, 40, 10, [3]uint8{255, 255, 255}, [3]uint8{0, 0, 0})
-		if err != nil {
-			return false
-		}
-		stream.Close()
-		return snap.Reported && snap.Status != nil && snap.Status.State == "working" && snap.Status.Progress == 40
+		list, err := client.List()
+		return err == nil && len(list.Terminals) == 1 && list.Terminals[0].Reported
 	})
+	v, err := attachView(t, client, rec.ID, 40, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the first info", func() bool {
+		info, ok := v.info()
+		return ok && info.Reported && info.Status != nil && info.Status.State == "working" && info.Status.Progress == 40
+	})
+}
+
+// TestAgentRedrawInPlace checks an agent's interface as pi draws it: a cursor
+// marker in an APC that BEL ends, then a redraw that moves up and erases the
+// lines it drew. The window shows the redraw, with nothing of the old frame
+// left and no escape sequence printed as text.
+func TestAgentRedrawInPlace(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	_, client := testCore(t)
+	script := `printf '\033[38;2;72;78;82m|\033[0m old command line\r\n> typed\033_pi:c\007\033[7m \033[27m'; sleep 0.2; ` +
+		`printf '\033[?2026h\r\033[1A\033[2K\033[38;2;72;78;82m|\033[0m new\r\n\033[2K> x\033_pi:c\007\033[?2026l'; sleep 30`
+	rec, err := client.Start(Start{Argv: []string{"/bin/sh", "-c", script}, Kind: "shell", Cols: 40, Rows: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := attachView(t, client, rec.ID, 40, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the redraw", func() bool { return strings.Contains(v.text(), "> x") })
+	text := v.text()
+	for _, stale := range []string{"old command", "typed", "72;78", "pi:c"} {
+		if strings.Contains(text, stale) {
+			t.Fatalf("the view shows %q after the redraw:\n%s", stale, text)
+		}
+	}
+	if !strings.Contains(text, "| new") {
+		t.Fatalf("the view lost the redrawn line:\n%s", text)
+	}
 }
 
 // TestCoreKeepsTerminalAfterDetach checks that a viewer going away does not
@@ -213,11 +272,11 @@ func TestCoreKeepsTerminalAfterDetach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, _, err := client.Attach(rec.ID, 20, 5, [3]uint8{255, 255, 255}, [3]uint8{0, 0, 0})
+	first, err := attachView(t, client, rec.ID, 20, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream.Close()
+	first.close()
 
 	// The program is still there, and a new viewer sees its screen.
 	waitFor(t, "the terminal to stay alive", func() bool {
@@ -225,12 +284,15 @@ func TestCoreKeepsTerminalAfterDetach(t *testing.T) {
 		return err == nil && len(list.Terminals) == 1 && list.Terminals[0].Alive
 	})
 	waitFor(t, "the screen to survive the detach", func() bool {
-		stream, snap, err := client.Attach(rec.ID, 20, 5, [3]uint8{255, 255, 255}, [3]uint8{0, 0, 0})
+		v, err := attachView(t, client, rec.ID, 20, 5)
 		if err != nil {
 			return false
 		}
-		stream.Close()
-		return strings.Contains(snapshotText(snap), "once")
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && !strings.Contains(v.text(), "once") {
+			time.Sleep(20 * time.Millisecond)
+		}
+		return strings.Contains(v.text(), "once")
 	})
 }
 
@@ -553,12 +615,12 @@ func TestCommandTransportThroughProxy(t *testing.T) {
 		read, err := client.Read(rec.ID, 5)
 		return err == nil && strings.Contains(strings.Join(read.Lines, "\n"), "remote")
 	})
-	stream, snap, err := client.Attach(rec.ID, 20, 4, [3]uint8{255, 255, 255}, [3]uint8{0, 0, 0})
+	stream, err := client.Attach(rec.ID, 20, 4, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.Cols != 20 || snap.Rows != 4 {
-		t.Fatalf("snapshot = %dx%d", snap.Cols, snap.Rows)
+	if stream.Cols != 20 || stream.Rows != 4 {
+		t.Fatalf("attached at %dx%d", stream.Cols, stream.Rows)
 	}
 	stream.Close()
 }

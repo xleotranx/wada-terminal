@@ -2,10 +2,10 @@ package terminal
 
 import (
 	"wada-terminal/internal/config"
-	"wada-terminal/internal/vt"
 
 	"github.com/xleotranx/wada-kit/native"
 
+	mterm "github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -133,34 +133,38 @@ func brightness(c ui.Color) float64 {
 	return 0.2126*float64(c.R) + 0.7152*float64(c.G) + 0.0722*float64(c.B)
 }
 
-// resolve maps a cell's color to one the painter takes, falling back to the
-// terminal's own foreground or background.
-func (s surface) resolve(c vt.Color, fallback ui.Color) ui.Color {
-	switch c.Kind {
-	case vt.ColorANSI:
-		if int(c.Index) < len(s.ansi) {
-			return s.ansi[c.Index]
-		}
-		return xterm256(c.Index)
-	case vt.ColorRGB:
-		return ui.RGB(c.R, c.G, c.B)
+// themeOf is a surface as the terminal view paints it.
+func themeOf(sf surface) *mterm.Theme {
+	return &mterm.Theme{
+		Foreground: sf.fg, Background: sf.bg,
+		Cursor: sf.cursor, Selection: sf.selBg, SelectionText: sf.selFg,
+		Palette: sf.ansi,
 	}
-	return fallback
 }
 
-// xterm256 maps the 256-color cube and gray ramp to a color.
-func xterm256(index uint8) ui.Color {
-	if index < 16 {
-		return darkSurface.ansi[index]
+// terminalThemes are the colors a terminal shows: a theme file's in both
+// appearances when one is selected, else the light and dark surfaces, which
+// the view picks between as the window's appearance changes.
+func (t *Plugin) terminalThemes() (light, dark *mterm.Theme) {
+	if t.theme != nil {
+		return themeOf(*t.theme), nil
 	}
-	if index >= 232 {
-		v := uint8(8 + 10*(index-232))
-		return ui.RGB(v, v, v)
+	return themeOf(lightSurface), themeOf(darkSurface)
+}
+
+// terminalTheme is the theme of the appearance the window shows now, which a
+// program starting in the core is told until a window says its own.
+func (t *Plugin) terminalTheme() *mterm.Theme { return themeOf(t.surface()) }
+
+// refreshSessionThemes gives every terminal the colors of a theme file just
+// loaded or dropped.
+func (t *Plugin) refreshSessionThemes() {
+	light, dark := t.terminalThemes()
+	for _, s := range t.allSessions() {
+		if s.term != nil {
+			s.term.SetTheme(light, dark)
+		}
 	}
-	i := index - 16
-	steps := [6]uint8{0, 95, 135, 175, 215, 255}
-	r, g, b := steps[i/36], steps[(i/6)%6], steps[i%6]
-	return ui.RGB(r, g, b)
 }
 
 // accent is the color of a session's icon and its focus ring.

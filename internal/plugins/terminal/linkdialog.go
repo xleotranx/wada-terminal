@@ -2,19 +2,55 @@ package terminal
 
 import (
 	"fmt"
-
-	"wada-terminal/internal/vt"
+	"regexp"
+	"strings"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/xleotranx/wada-kit/native"
 )
 
-// linkState is the link picker: every hyperlink on the focused screen.
+// linkState is the link picker: the hyperlinks and URLs the focused pane's
+// program printed.
 type linkState struct {
 	open    bool
-	links   []vt.Hyperlink
+	links   []printedLink
 	sel     int
 	session *session
+}
+
+// printedLink is a link a program printed: a URL in its text, with the line
+// it is on counted from the top of the scrollback, or a hyperlink's target
+// (OSC 8), which has no line, Line being -1.
+type printedLink struct {
+	URL  string
+	Line int
+}
+
+// urlPattern finds the URLs a program prints as text.
+var urlPattern = regexp.MustCompile(`(?:https?|file)://[^\s<>"'` + "`" + `]+`)
+
+// printedLinks lists the targets of a program's hyperlinks, then the URLs in
+// a terminal's text, each once.
+func printedLinks(hyperlinks []string, text string) []printedLink {
+	var out []printedLink
+	seen := map[string]bool{}
+	for _, url := range hyperlinks {
+		if !seen[url] {
+			seen[url] = true
+			out = append(out, printedLink{URL: url, Line: -1})
+		}
+	}
+	for i, line := range strings.Split(text, "\n") {
+		for _, url := range urlPattern.FindAllString(line, -1) {
+			url = strings.TrimRight(url, ".,;:!?)]}")
+			if seen[url] {
+				continue
+			}
+			seen[url] = true
+			out = append(out, printedLink{URL: url, Line: i})
+		}
+	}
+	return out
 }
 
 // openLinks shows the links of the focused pane, or closes the picker.
@@ -30,7 +66,7 @@ func (t *Plugin) openLinks() {
 	if s == nil {
 		return
 	}
-	t.links = linkState{open: true, session: s, links: s.screen.Links()}
+	t.links = linkState{open: true, session: s, links: printedLinks(s.links, s.screenText())}
 	if t.ctx != nil {
 		t.ctx.Invalidate()
 	}
@@ -58,7 +94,7 @@ func (t *Plugin) linkBody(c *ui.Context) {
 		ui.Box(c).Grow(1).MinWidth(0)
 		ui.Text(c, fmt.Sprintf("%d", len(t.links.links))).FontSize(10).TextColor(pal.Faint)
 	})
-	ui.Text(c, "Hyperlinks on this pane's screen and in its scrollback.").FontSize(11).
+	ui.Text(c, "Links this pane's program printed, on its screen and in its scrollback.").FontSize(11).
 		TextColor(pal.Muted).SingleLine().Ellipsis("…")
 	if len(t.links.links) == 0 {
 		ui.Column(c).FillWidth().Height(100).Center().Gap(6).Children(func() {
@@ -87,8 +123,11 @@ func (t *Plugin) linkBody(c *ui.Context) {
 						ui.Column(c).Grow(1).MinWidth(0).Gap(1).Children(func() {
 							ui.Text(c, link.URL).FontSize(11).TextColor(pal.Text).
 								SingleLine().Ellipsis("…")
-							ui.Text(c, fmt.Sprintf("line %d", link.Line+1)).FontSize(8.5).
-								TextColor(pal.Faint)
+							where := "hyperlink"
+							if link.Line >= 0 {
+								where = fmt.Sprintf("line %d", link.Line+1)
+							}
+							ui.Text(c, where).FontSize(8.5).TextColor(pal.Faint)
 						})
 					})
 				})

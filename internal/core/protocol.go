@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"wada-terminal/internal/status"
 )
 
 // SocketName is the core's socket in the app's data folder.
@@ -30,8 +32,7 @@ type Request struct {
 	Start        *Start          `json:"start,omitempty"`
 	Cols         int             `json:"cols,omitempty"`
 	Rows         int             `json:"rows,omitempty"`
-	FgRGB        [3]uint8        `json:"fg,omitempty"`
-	BgRGB        [3]uint8        `json:"bg,omitempty"`
+	Theme        *Theme          `json:"theme,omitempty"` // the colors an attaching window shows
 	Data         []byte          `json:"data,omitempty"`  // input for send
 	Lines        int             `json:"lines,omitempty"` // how much of the screen for read
 	Layout       json.RawMessage `json:"layout,omitempty"`
@@ -57,9 +58,24 @@ type Start struct {
 	Cols   int               `json:"cols,omitempty"`
 	Rows   int               `json:"rows,omitempty"`
 	Dark   bool              `json:"dark,omitempty"`
-	FgRGB  [3]uint8          `json:"fg,omitempty"`
-	BgRGB  [3]uint8          `json:"bg,omitempty"`
+	Theme  *Theme            `json:"theme,omitempty"` // the colors programs are told, until a window says its own
 	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// Info is what an attached window needs beside the screen, which its frames
+// carry: the program's title and working directory, its OSC 7501 reports,
+// which make it an agent, whether it asked for bracketed paste, and the
+// targets of the hyperlinks it printed. The first Info of a stream holds the
+// program's own record as it stands and the links so far; later ones the
+// reports and links since the last.
+type Info struct {
+	Title     string          `json:"title,omitempty"`
+	Cwd       string          `json:"cwd,omitempty"`
+	Reported  bool            `json:"reported,omitempty"`
+	Status    *status.Status  `json:"status,omitempty"`
+	Reports   []status.Status `json:"reports,omitempty"`
+	Bracketed bool            `json:"bracketed,omitempty"`
+	Links     []string        `json:"links,omitempty"`
 }
 
 // Exit is why a terminal's program ended.

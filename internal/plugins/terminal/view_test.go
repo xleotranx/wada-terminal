@@ -1,15 +1,11 @@
 package terminal
 
-import (
-	"testing"
-
-	"wada-terminal/internal/vt"
-)
+import "testing"
 
 // A split names its arrangement rather than promoting the focused terminal.
 func TestSplitTitleSurvivesFocusChange(t *testing.T) {
-	a := &session{name: "OpenCode", screen: vt.New(4, 2)}
-	b := &session{name: "Codex", screen: vt.New(4, 2)}
+	a := &session{name: "OpenCode"}
+	b := &session{name: "Codex"}
 	root, _ := splitAt(leafOf(a), a, b, false)
 	tb := &tab{id: 7, root: root, focus: a}
 	before := tabTitle(tb)
@@ -21,7 +17,7 @@ func TestSplitTitleSurvivesFocusChange(t *testing.T) {
 
 // TestTabTitleWithoutFocus checks the fallback when a tab has no focused pane.
 func TestTabTitleWithoutFocus(t *testing.T) {
-	a := &session{name: "Claude Code", screen: vt.New(4, 2)}
+	a := &session{name: "Claude Code"}
 	tb := &tab{root: leafOf(a)}
 	if got := tabTitle(tb); got != "Claude Code" {
 		t.Fatalf("tab title = %q", got)
@@ -94,8 +90,8 @@ func TestRollupLabel(t *testing.T) {
 // Saved split names survive a changed runtime id; single terminals retain
 // their live program titles instead of freezing a title at save time.
 func TestSavedArrangementNames(t *testing.T) {
-	a := &session{name: "OpenCode", screen: vt.New(4, 2)}
-	b := &session{name: "Codex", screen: vt.New(4, 2)}
+	a := &session{name: "OpenCode"}
+	b := &session{name: "Codex"}
 	root, _ := splitAt(leafOf(a), a, b, false)
 	tb := &tab{id: 7, root: root, focus: a}
 	p := &Plugin{workspaces: []*workspace{{tabs: []*tab{tb}}}}

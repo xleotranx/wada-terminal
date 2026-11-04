@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"image"
-	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,7 +149,39 @@ func (w *window) settle() {
 // texts is what the frame shows, as text.
 func (w *window) texts() string {
 	w.tt.Frame()
-	return strings.Join(w.tt.Texts(), "\n")
+	return strings.Join(append(w.tt.Texts(), w.paneTexts()...), "\n")
+}
+
+// paneTexts is what every pane's terminal shows, which the terminal paints
+// rather than lays out as text, read the way a script reads it.
+func (w *window) paneTexts() []string {
+	raw, err := w.call(control.Request{Method: "ls"})
+	if err != nil {
+		return nil
+	}
+	var list control.List
+	if json.Unmarshal(raw, &list) != nil {
+		return nil
+	}
+	var out []string
+	for _, space := range list.Spaces {
+		for _, tab := range space.Tabs {
+			for _, pane := range tab.Panes {
+				raw, err := w.call(control.Request{Method: "do", Action: "terminal.read",
+					Args: map[string]any{"pane": pane.ID}})
+				if err != nil {
+					continue
+				}
+				var read struct {
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(raw, &read) == nil && read.Text != "" {
+					out = append(out, read.Text)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // command runs a command the way the menu bar does.
@@ -320,31 +351,6 @@ func (w *window) typeLine(text string) {
 	w.tt.Key(0, ui.KeyEnter)
 }
 
-// TestScrollbackScrollsTheScreen checks that the wheel reads back through what
-// a session printed, and that the header says how far back the view is.
-func TestScrollbackScrollsTheScreen(t *testing.T) {
-	if !hasPTY() {
-		t.Skip("no pseudo-terminals on this machine")
-	}
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.typeLine("seq 1 120")
-	deadline := time.Now().Add(20 * time.Second)
-	for !hasLine(w.texts(), "120") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(10 * time.Millisecond)
-	}
-	// The pointer sits over the pane's cells; the wheel goes up, into the
-	// history.
-	w.tt.Wheel(600, 400, 0, -60)
-	if texts := w.texts(); !strings.Contains(texts, "↑") {
-		t.Fatalf("the frame does not show the view is above the bottom:\n%s", texts)
-	}
-}
-
 // hasLine reports whether the frame has want as a line of its own, trimmed.
 func hasLine(texts, want string) bool {
 	for _, line := range strings.Split(texts, "\n") {
@@ -391,10 +397,10 @@ func containsAny(texts string, wants []string) bool {
 	return false
 }
 
-// TestSelectionCopiesThroughTheMenu drags over a line of a pane and runs the
-// copy command, as the Edit menu's Copy does: the cells under the drag come
-// back as text on the clipboard.
-func TestSelectionCopiesThroughTheMenu(t *testing.T) {
+// TestSelectionCopiesWithTheKeys selects a pane's text with the keys that
+// select and copy on macOS, which the pane's terminal binds: what it shows
+// comes back as text on the clipboard.
+func TestSelectionCopiesWithTheKeys(t *testing.T) {
 	if !hasPTY() {
 		t.Skip("no pseudo-terminals on this machine")
 	}
@@ -409,17 +415,47 @@ func TestSelectionCopiesThroughTheMenu(t *testing.T) {
 		w.run()
 		time.Sleep(10 * time.Millisecond)
 	}
-	rect, ok := w.tt.Find("hello-copy")
-	if !ok {
-		t.Fatalf("the frame has no line to select:\n%s", w.texts())
-	}
-	y := rect.Y + rect.H/2
-	w.tt.Press(rect.X+1, y)
-	w.tt.Move(rect.X+rect.W-2, y)
-	w.tt.Release(rect.X+rect.W-2, y)
-	w.command("terminal.copy")
+	w.tt.Key(ui.Super, ui.KeyA)
+	w.tt.Key(ui.Super, ui.KeyC)
+	w.settle()
 	if got := w.tt.Clipboard(); !strings.Contains(got, "hello-copy") {
-		t.Fatalf("the clipboard holds %q, not the selected line", got)
+		t.Fatalf("the clipboard holds %q, not the pane's text", got)
+	}
+}
+
+// TestAgentRedrawInPlace runs a program that draws as pi does: its input's
+// cursor marked with an APC that BEL ends, then redrawn in place by moving up
+// and erasing lines. The pane shows the redraw alone, with nothing of the old
+// frame left and no escape sequence printed as text.
+func TestAgentRedrawInPlace(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	script := filepath.Join(w.dir, "redraw.sh")
+	body := `printf '\033[38;2;72;78;82m|\033[0m old command line\r\n> typed\033_pi:c\007\033[7m \033[27m'
+sleep 0.2
+printf '\033[?2026h\r\033[1A\033[2K\033[38;2;72;78;82m|\033[0m redrawn\r\n\033[2K> x\033_pi:c\007\033[?2026l'
+sleep 30
+`
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.command("terminal.new-tab")
+	w.typeLine("clear; sh " + script)
+	deadline := time.Now().Add(20 * time.Second)
+	for !strings.Contains(w.texts(), "| redrawn") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the redraw never showed:\n%s", w.texts())
+		}
+		w.run()
+		time.Sleep(20 * time.Millisecond)
+	}
+	texts := w.texts()
+	for _, stale := range []string{"old command line", "> typed", "72;78", "pi:c"} {
+		if strings.Contains(texts, stale) {
+			t.Fatalf("the pane shows %q after the redraw:\n%s", stale, texts)
+		}
 	}
 }
 
@@ -487,36 +523,6 @@ func TestMouseReportingReachesTheProgram(t *testing.T) {
 		w.tt.ClickAt(600, 400)
 		w.run()
 		time.Sleep(150 * time.Millisecond)
-	}
-}
-
-// TestHyperlinkClickOpens prints a link with OSC 8 and clicks its text: the
-// cell under the pointer knows its URL, and the click asks the window to open
-// it.
-func TestHyperlinkClickOpens(t *testing.T) {
-	if !hasPTY() {
-		t.Skip("no pseudo-terminals on this machine")
-	}
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.typeLine(`printf '\033]8;;https://example.com\033\\click me\033]8;;\033\\\n'`)
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		w.tt.Frame()
-		if rect, ok := w.tt.Find("click me"); ok {
-			// The row's box is as wide as the pane; the link is its first
-			// cells.
-			w.tt.ClickAt(rect.X+10, rect.Y+rect.H/2)
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the link never showed:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(20 * time.Millisecond)
-	}
-	if urls := w.tt.OpenedURLs(); len(urls) == 0 || urls[0] != "https://example.com" {
-		t.Fatalf("opened %q, want the link's URL", urls)
 	}
 }
 
@@ -726,88 +732,6 @@ func TestCoreKeepsTerminalsWhenTheWindowCloses(t *testing.T) {
 	}
 	if texts := w2.texts(); !strings.Contains(texts, "Shell") {
 		t.Fatalf("the reopened window does not show its terminals:\n%s", texts)
-	}
-}
-
-// TestCursorPaintsOverTheGlyph puts the cursor on a letter and checks that its
-// bar is on top: a caret painted under the glyph disappears in an agent's input
-// field, where the program leaves the cursor on the placeholder's first letter.
-func TestCursorPaintsOverTheGlyph(t *testing.T) {
-	if !hasPTY() {
-		t.Skip("no pseudo-terminals on this machine")
-	}
-	w := startWindow(t)
-	w.tt.SetDark(true)
-	w.command("terminal.new-tab")
-	w.typeLine(`printf '\033[2J\033[HMZ\033[2D'; sleep 30`)
-	deadline := time.Now().Add(20 * time.Second)
-	for !hasLine(w.texts(), "MZ") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the shell never cleared its screen:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(10 * time.Millisecond)
-	}
-	rect, ok := w.tt.Find("MZ")
-	if !ok || rect.W < 2 {
-		t.Fatalf("the frame has no MZ to put the cursor on:\n%s", w.texts())
-	}
-	img := w.tt.Image()
-	cursor := color.RGBA{R: 0xe9, G: 0xe9, B: 0xef, A: 0xff}
-	y0, y1 := int(rect.Y+rect.H*0.3), int(rect.Y+rect.H*0.7)
-	for dx := 0; dx < 2; dx++ {
-		x := int(rect.X) + dx
-		run := 0
-		for y := y0; y <= y1; y++ {
-			if img.RGBAAt(x, y) == cursor {
-				run++
-			}
-		}
-		if run >= y1-y0-1 {
-			return
-		}
-	}
-	t.Fatalf("the cursor bar is not painted over the letter at %v", rect)
-}
-
-// TestReverseSpacePaintsItsBackground leaves a run of reversed spaces, which
-// is how Pi draws its own cursor, and checks the block is painted: a run of
-// blanks at the end of a line otherwise loses its background in the text
-// layout.
-func TestReverseSpacePaintsItsBackground(t *testing.T) {
-	if !hasPTY() {
-		t.Skip("no pseudo-terminals on this machine")
-	}
-	w := startWindow(t)
-	w.tt.SetDark(true)
-	w.command("terminal.new-tab")
-	w.typeLine(`printf '\033[2J\033[H\033[7m  \033[0m\nZ'; sleep 30`)
-	deadline := time.Now().Add(20 * time.Second)
-	for !hasLine(w.texts(), "Z") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the shell never drew the reversed run:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(10 * time.Millisecond)
-	}
-	// The reversed run is alone on the first row, the Z marks the second;
-	// the run is trailing whitespace, which the text layout drops.
-	rect, ok := w.tt.Find("Z")
-	if !ok {
-		t.Fatalf("the frame has no Z under the reversed run:\n%s", w.texts())
-	}
-	img := w.tt.Image()
-	light := color.RGBA{R: 0xcf, G: 0xcf, B: 0xd6, A: 0xff}
-	y := int(rect.Y - rect.H*0.5)
-	run := 0
-	for x := int(rect.X); x < int(rect.X)+24 && x < img.Bounds().Max.X; x++ {
-		if img.RGBAAt(x, y) != light {
-			break
-		}
-		run++
-	}
-	if run < 12 {
-		t.Fatalf("the reversed run paints %d light pixels, want its two cells", run)
 	}
 }
 
@@ -2049,55 +1973,6 @@ func TestFindBarSearchesThePane(t *testing.T) {
 	}
 }
 
-// TestScrollModeMovesThroughHistory checks the vi-like scroll mode takes keys
-// from the program, reports its offset, and leaves on q.
-func TestScrollModeMovesThroughHistory(t *testing.T) {
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.typeLine("seq 1 100")
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if hasLine(w.texts(), "100") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(20 * time.Millisecond)
-	}
-	w.command("terminal.scroll-mode")
-	if !strings.Contains(w.texts(), "SCROLL") {
-		t.Fatalf("scroll mode did not show:\n%s", w.texts())
-	}
-	for range 5 {
-		w.tt.Key(0, ui.KeyK)
-	}
-	status, err := w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current control.Status
-	if err := json.Unmarshal(status, &current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Pane == nil || !current.Pane.ScrollMode || current.Pane.Scrolled == 0 {
-		t.Fatalf("status pane = %+v", current.Pane)
-	}
-	w.tt.Key(0, ui.KeyQ)
-	status, err = w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	current = control.Status{}
-	if err := json.Unmarshal(status, &current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Pane == nil || current.Pane.ScrollMode || current.Pane.Scrolled != 0 {
-		t.Fatalf("after q = %+v", current.Pane)
-	}
-}
-
 // TestCustomAgentCommand starts an agents.json program from the Session menu,
 // marks it an agent, and keeps its name and glyph.
 func TestCustomAgentCommand(t *testing.T) {
@@ -2250,154 +2125,8 @@ func TestLinkPickerListsURLs(t *testing.T) {
 	}
 	w.tt.Key(0, ui.KeyEscape)
 	texts = w.texts()
-	if strings.Contains(texts, "Hyperlinks on this pane's screen") {
+	if strings.Contains(texts, "Links this pane's program printed") {
 		t.Fatalf("the link picker did not close:\n%s", texts)
-	}
-}
-
-// TestVisualSelectionCopiesLines checks v selects lines in scroll mode and y
-// copies them and clears the selection.
-func TestVisualSelectionCopiesLines(t *testing.T) {
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.typeLine("seq 1 100")
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if hasLine(w.texts(), "100") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(20 * time.Millisecond)
-	}
-	w.command("terminal.scroll-mode")
-	w.tt.Key(ui.Shift, ui.KeyV)
-	for range 3 {
-		w.tt.Key(0, ui.KeyJ)
-	}
-	status, err := w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current control.Status
-	if err := json.Unmarshal(status, &current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Pane == nil || !current.Pane.Visual || !current.Pane.VisualLinewise ||
-		current.Pane.VisualTo <= current.Pane.VisualFrom {
-		t.Fatalf("visual status = %+v", current.Pane)
-	}
-	w.tt.Key(0, ui.KeyY)
-	deadline = time.Now().Add(10 * time.Second)
-	for {
-		texts := w.texts()
-		if strings.Contains(texts, "Copied") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the copy did not report:\n%s", texts)
-		}
-		w.run()
-		time.Sleep(20 * time.Millisecond)
-	}
-	status, err = w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	current = control.Status{}
-	if err := json.Unmarshal(status, &current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Pane == nil || current.Pane.Visual {
-		t.Fatalf("after copy = %+v", current.Pane)
-	}
-	if got := w.tt.Clipboard(); got == "" {
-		t.Fatal("the visual copy put nothing on the clipboard")
-	}
-}
-
-// TestCharacterVisualSelectsCells checks v selects by cell and h/l widen it.
-func TestCharacterVisualSelectsCells(t *testing.T) {
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.typeLine("seq 1 100")
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if hasLine(w.texts(), "100") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the shell never printed its lines:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(20 * time.Millisecond)
-	}
-	w.command("terminal.scroll-mode")
-	w.tt.Key(0, ui.KeyV)
-	w.tt.Key(ui.Shift, ui.Key4)
-	status, err := w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var atEnd control.Status
-	if err := json.Unmarshal(status, &atEnd); err != nil {
-		t.Fatal(err)
-	}
-	if atEnd.Pane == nil || atEnd.Pane.VisualToCol == 0 {
-		t.Fatalf("$ did not move to the line end: %+v", atEnd.Pane)
-	}
-	w.tt.Key(0, ui.Key0)
-	w.tt.Key(0, ui.KeyL)
-	w.tt.Key(0, ui.KeyJ)
-	status, err = w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current control.Status
-	if err := json.Unmarshal(status, &current); err != nil {
-		t.Fatal(err)
-	}
-	pane := current.Pane
-	if pane == nil || !pane.Visual || pane.VisualLinewise || pane.VisualToCol != 1 || pane.VisualFromCol != 0 {
-		t.Fatalf("character selection = %+v", pane)
-	}
-	w.tt.Key(0, ui.KeyY)
-	if got := w.tt.Clipboard(); got == "" {
-		t.Fatal("the character selection copied nothing")
-	}
-}
-
-// TestScrollModePastesClipboard checks p leaves scroll mode and types the
-// clipboard into the program.
-func TestScrollModePastesClipboard(t *testing.T) {
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.tt.SetClipboard("echo from-scroll-mode")
-	w.command("terminal.scroll-mode")
-	w.tt.Key(0, ui.KeyP)
-	status, err := w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current control.Status
-	if err := json.Unmarshal(status, &current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Pane == nil || current.Pane.ScrollMode || current.Pane.Scrolled != 0 {
-		t.Fatalf("status = %+v", current.Pane)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if strings.Contains(w.texts(), "from-scroll-mode") {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the paste never reached the shell:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -2479,62 +2208,6 @@ func TestForegroundAdoptsAgent(t *testing.T) {
 			t.Fatalf("the foreground program did not adopt the agent: %+v\n%s", current.Pane, w.texts())
 		}
 		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// TestVisualDeleteClearsSelection checks d drops the visual selection while
-// staying in scroll mode; scrollback itself is read-only.
-func TestVisualDeleteClearsSelection(t *testing.T) {
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.command("terminal.scroll-mode")
-	w.tt.Key(0, ui.KeyV)
-	w.tt.Key(0, ui.KeyD)
-	status, err := w.call(control.Request{Method: "status"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current control.Status
-	if err := json.Unmarshal(status, &current); err != nil {
-		t.Fatal(err)
-	}
-	if current.Pane == nil || current.Pane.Visual || !current.Pane.ScrollMode {
-		t.Fatalf("after d = %+v", current.Pane)
-	}
-}
-
-// TestHoverLinkPreview clears a pane and prints a link at its top-left, then
-// moves the pointer there and looks for the URL preview.
-func TestHoverLinkPreview(t *testing.T) {
-	w := startWindow(t)
-	w.command("terminal.new-tab")
-	w.typeLine("printf '\\033[2J\\033[H\\033]8;;https://hover.example\\aHoverMe\\033]8;;\\a\\n'")
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if strings.Contains(w.texts(), "HoverMe") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the linked text never drew:\n%s", w.texts())
-		}
-		w.run()
-		time.Sleep(20 * time.Millisecond)
-	}
-	rect, ok := w.tt.Find("HoverMe")
-	if !ok {
-		t.Fatalf("the linked row is not a findable label:\n%s", w.texts())
-	}
-	w.tt.Move(rect.X+5, rect.Y+5)
-	deadline = time.Now().Add(10 * time.Second)
-	for {
-		w.run()
-		if strings.Contains(w.texts(), "https://hover.example") {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the hover preview never appeared:\n%s", w.texts())
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
