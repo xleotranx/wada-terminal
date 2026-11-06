@@ -800,6 +800,82 @@ func (w *window) call(req control.Request) (json.RawMessage, error) {
 	}
 }
 
+// TestSendTypesIntoTheNamedPane sends a command to the pane that does not have
+// the keyboard, through the socket and a real shell, and reads the answer back
+// from that pane alone. An id no pane has is refused and types nowhere.
+func TestSendTypesIntoTheNamedPane(t *testing.T) {
+	if !hasPTY() {
+		t.Skip("no pseudo-terminals on this machine")
+	}
+	w := startWindow(t)
+	w.command("terminal.new-tab")
+	w.command("terminal.split-right") // a second shell, which takes the focus
+	raw, err := w.call(control.Request{Method: "status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status control.Status
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Pane == nil || status.Space == nil {
+		t.Fatalf("no focused pane: %s", raw)
+	}
+	focused, other := status.Pane.ID, 0
+	for _, pane := range status.Space.Tabs[status.Tab-1].Panes {
+		if pane.ID != focused {
+			other = pane.ID
+		}
+	}
+	if other == 0 {
+		t.Fatalf("the tab has no unfocused pane: %s", raw)
+	}
+	read := func(id int) string {
+		raw, err := w.call(control.Request{Method: "do", Action: "terminal.read",
+			Args: map[string]any{"pane": id}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got.Text
+	}
+
+	// The shell works out the marker, so finding it means the line ran, not
+	// only that it was echoed.
+	if _, err := w.call(control.Request{Method: "do", Action: "terminal.send",
+		Args: map[string]any{"terminal": other, "text": "echo zq$((6*7))x"}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for !hasLine(read(other), "zq42x") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the named pane did not run the line:\n%s", read(other))
+		}
+		w.run()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := read(focused); strings.Contains(got, "zq") {
+		t.Fatalf("the focused pane got the text:\n%s", got)
+	}
+
+	_, err = w.call(control.Request{Method: "do", Action: "terminal.send",
+		Args: map[string]any{"terminal": 99999, "text": "echo zqrefused"}})
+	if err == nil || !strings.Contains(err.Error(), "no pane 99999") {
+		t.Fatalf("an unknown id answered %v", err)
+	}
+	w.settle()
+	for _, id := range []int{focused, other} {
+		if got := read(id); strings.Contains(got, "zqrefused") {
+			t.Fatalf("pane %d got the refused text:\n%s", id, got)
+		}
+	}
+}
+
 // TestControlSocketDrivesTheWindow checks the agent-facing API: the window
 // answers ls and status, makes a tab, and refuses an action it does not know.
 func TestControlSocketDrivesTheWindow(t *testing.T) {

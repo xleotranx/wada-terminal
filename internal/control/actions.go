@@ -91,7 +91,7 @@ var Actions = []Action{
 		Args: []Arg{{Name: "pane", Type: "int", Required: true, Description: "Its id, as ls prints it."}}},
 	{Name: "terminal.send", Description: "Type text into a pane's program.",
 		Args: []Arg{
-			{Name: "terminal", Type: "int", Required: true, Description: "The pane's id."},
+			{Name: "terminal", Type: "int", Required: true, Description: "The pane's id, as ls prints it; there is no focused default."},
 			{Name: "text", Type: "string", Required: true, Description: "The text; no keys or escapes, send those with the program's own protocol."},
 			{Name: "submit", Type: "bool", Description: "Press Return after the text; default true.", Default: true},
 		}},

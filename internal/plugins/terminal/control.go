@@ -492,7 +492,13 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		return map[string]any{"pane": s.id}, nil
 
 	case "terminal.send":
-		s, err := t.paneFrom(args)
+		// Text must reach the pane the caller named: in another pane it could
+		// answer an agent's prompt, so this action has no focused default.
+		id, ok := control.Int(args, "terminal")
+		if !ok {
+			return nil, fmt.Errorf("terminal.send needs a terminal")
+		}
+		s, err := t.paneByID(id)
 		if err != nil {
 			return nil, err
 		}
@@ -550,15 +556,20 @@ func (t *Plugin) spaceFrom(args map[string]any) (*workspace, error) {
 // paneFrom finds a pane by id, or the focused one when none is named.
 func (t *Plugin) paneFrom(args map[string]any) (*session, error) {
 	if id, ok := control.Int(args, "pane"); ok {
-		if s := t.sessionByID(id); s != nil {
-			return s, nil
-		}
-		return nil, fmt.Errorf("no pane %d", id)
+		return t.paneByID(id)
 	}
 	if t.current == nil || t.current.focus == nil {
 		return nil, fmt.Errorf("no focused pane")
 	}
 	return t.current.focus, nil
+}
+
+// paneByID finds a pane by the id ls prints; an id no pane has is an error.
+func (t *Plugin) paneByID(id int) (*session, error) {
+	if s := t.sessionByID(id); s != nil {
+		return s, nil
+	}
+	return nil, fmt.Errorf("no pane %d", id)
 }
 
 // sessionByID finds a session by the id ls prints.

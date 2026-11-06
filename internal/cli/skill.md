@@ -37,6 +37,10 @@ wada-terminal do pane.split '{"direction":"right","pane":4}'
 It prints the created or changed ids as JSON, or an error and exits 1. Check
 the result with `ls` or `status`.
 
+`terminal.send` takes its target as `--terminal`, the pane's id from `ls` (not
+a `t7` from `core ls`). The target is required and need not have the focus; an
+id no pane has is an error, and the text never goes to the focused pane instead.
+
 ## Programs outside the window
 
 The core keeps running without a window, and its own command line can start,
