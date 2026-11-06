@@ -290,3 +290,13 @@ function render(api) {
 		t.Fatalf("style = %+v", node.Style)
 	}
 }
+
+func TestRenderCannotPersistState(t *testing.T) {
+	r, err := New("readonly", `function render(api) { if(typeof api.saveState !== "undefined" || typeof api.save_state !== "undefined") throw new Error("persistence in render"); return {type:"text",text:"ok"}; }`, &API{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.Render(); err != nil {
+		t.Fatal(err)
+	}
+}

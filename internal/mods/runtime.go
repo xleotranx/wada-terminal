@@ -197,6 +197,9 @@ func (r *Runtime) apiObject(interactive bool, props map[string]any, inputs map[s
 		r.frameEvery = time.Duration(ms) * time.Millisecond
 		return goja.Undefined()
 	})
+	if !interactive {
+		return object
+	}
 	save := func(goja.FunctionCall) goja.Value {
 		if r.api.SaveState == nil {
 			return goja.Undefined()
@@ -212,9 +215,6 @@ func (r *Runtime) apiObject(interactive bool, props map[string]any, inputs map[s
 	}
 	_ = object.Set("saveState", save)
 	_ = object.Set("save_state", save)
-	if !interactive {
-		return object
-	}
 	_ = object.Set("run", func(call goja.FunctionCall) goja.Value {
 		if r.api.Run == nil {
 			panic(r.vm.NewGoError(fmt.Errorf("mods cannot run commands here")))

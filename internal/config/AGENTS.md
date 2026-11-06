@@ -381,12 +381,13 @@ What `api` gives render:
 - `api.focused`: the pane id with the keyboard, or 0
 - `api.props`: the layout block's `props` object
 - `api.state`: this mod's state, loaded from `state.json`
-- `api.saveState()`: write `state.json` now (a click saves automatically)
 - `api.now`: milliseconds since the epoch
 - `api.animate(ms)`: ask the window to draw this block again every `ms`
   (16–1000); with `api.now` and transforms, a mod can move or fade
 
 A click's API also has:
+
+- `api.saveState()`: write `state.json` now (a click saves automatically)
 
 - `api.run(action, args)`: run any `wada-terminal do` action; it is validated
   and returns the action's result or throws
