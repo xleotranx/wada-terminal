@@ -502,6 +502,9 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !s.writable() {
+			return nil, fmt.Errorf("pane %d is not running", id)
+		}
 		text, _ := control.String(args, "text")
 		submit := true
 		if v, ok := control.Bool(args, "submit"); ok {

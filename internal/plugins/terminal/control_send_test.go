@@ -179,3 +179,32 @@ func TestSendHandlerNeedsATarget(t *testing.T) {
 		t.Fatalf("the focused pane got %q", got)
 	}
 }
+
+// TestSendRefusesAStoppedPane checks that a pane whose program ended, or whose
+// terminal never started, answers with an error: a caller must not be told
+// that text was delivered when nothing took it.
+func TestSendRefusesAStoppedPane(t *testing.T) {
+	t.Run("program ended", func(t *testing.T) {
+		sw := newSendWindow(t)
+		sw.beside.alive = false
+		resp := sw.send(map[string]any{"terminal": float64(12), "text": "secret"})
+		if !strings.Contains(resp.Error, "pane 12 is not running") {
+			t.Fatalf("answer = %+v", resp)
+		}
+		// In order, as in TestSendRefusesAnUnnamedTarget; the terminal itself
+		// takes the marker, since a stopped session writes nothing.
+		sw.beside.term.Send([]byte("marker"))
+		waitFor(t, sw.besideIn, "marker")
+		if got := sw.besideIn.text(); got != "marker" {
+			t.Fatalf("the stopped pane got %q", got)
+		}
+	})
+	t.Run("no terminal yet", func(t *testing.T) {
+		sw := newSendWindow(t)
+		sw.beside.term = nil
+		resp := sw.send(map[string]any{"terminal": float64(12), "text": "secret"})
+		if !strings.Contains(resp.Error, "pane 12 is not running") {
+			t.Fatalf("answer = %+v", resp)
+		}
+	})
+}

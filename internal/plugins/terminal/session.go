@@ -455,11 +455,15 @@ func (s *session) ended() {
 
 // write gives the program input, as keys typed into the pane.
 func (s *session) write(b []byte) {
-	if len(b) == 0 || s.term == nil || !s.alive {
+	if len(b) == 0 || !s.writable() {
 		return
 	}
 	s.term.Send(b)
 }
+
+// writable reports whether a program is there to take input: its terminal has
+// started and the program has not ended.
+func (s *session) writable() bool { return s.term != nil && s.alive }
 
 // kill ends the program and its terminal, and forgets the session.
 func (s *session) kill() {

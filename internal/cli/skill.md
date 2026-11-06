@@ -40,6 +40,7 @@ the result with `ls` or `status`.
 `terminal.send` takes its target as `--terminal`, the pane's id from `ls` (not
 a `t7` from `core ls`). The target is required and need not have the focus; an
 id no pane has is an error, and the text never goes to the focused pane instead.
+A pane that has stopped or is still starting is an error too: nothing was sent.
 
 ## Programs outside the window
 
