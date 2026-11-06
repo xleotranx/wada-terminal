@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -14,9 +15,10 @@ import (
 // output. It is how a core on another machine is reached: an SSH command runs
 // `core-proxy` there, and the proxy speaks to the remote core's socket.
 type CommandTransport struct {
-	Args   []string
-	Env    []string
-	Stderr io.Writer
+	Context context.Context
+	Args    []string
+	Env     []string
+	Stderr  io.Writer
 }
 
 // Dial starts the command and returns a connection to its pipes.
@@ -24,7 +26,11 @@ func (t CommandTransport) Dial() (net.Conn, error) {
 	if len(t.Args) == 0 {
 		return nil, fmt.Errorf("core: no command for the transport")
 	}
-	cmd := exec.Command(t.Args[0], t.Args[1:]...)
+	ctx := t.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, t.Args[0], t.Args[1:]...)
 	if len(t.Env) > 0 {
 		cmd.Env = t.Env
 	}
@@ -48,8 +54,8 @@ func (t CommandTransport) Dial() (net.Conn, error) {
 	return &pipeConn{in: stdin, out: stdout, cmd: cmd}, nil
 }
 
-// pipeConn is a net.Conn over a child process's pipes. Deadlines are a no-op;
-// the commands this carries do not use them for flow control.
+// pipeConn is a net.Conn over a child process's pipes. Pipe deadlines bound
+// requests even when SSH or the remote core stops answering.
 type pipeConn struct {
 	in       io.WriteCloser
 	out      io.ReadCloser
@@ -73,11 +79,26 @@ func (p *pipeConn) Close() error {
 	return p.closeErr
 }
 
-func (p *pipeConn) LocalAddr() net.Addr              { return pipeAddr("local") }
-func (p *pipeConn) RemoteAddr() net.Addr             { return pipeAddr("remote") }
-func (p *pipeConn) SetDeadline(time.Time) error      { return nil }
-func (p *pipeConn) SetReadDeadline(time.Time) error  { return nil }
-func (p *pipeConn) SetWriteDeadline(time.Time) error { return nil }
+func (p *pipeConn) LocalAddr() net.Addr  { return pipeAddr("local") }
+func (p *pipeConn) RemoteAddr() net.Addr { return pipeAddr("remote") }
+func (p *pipeConn) SetDeadline(at time.Time) error {
+	if err := p.SetReadDeadline(at); err != nil {
+		return err
+	}
+	return p.SetWriteDeadline(at)
+}
+func (p *pipeConn) SetReadDeadline(at time.Time) error {
+	if f, ok := p.out.(interface{ SetReadDeadline(time.Time) error }); ok {
+		return f.SetReadDeadline(at)
+	}
+	return os.ErrNoDeadline
+}
+func (p *pipeConn) SetWriteDeadline(at time.Time) error {
+	if f, ok := p.in.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		return f.SetWriteDeadline(at)
+	}
+	return os.ErrNoDeadline
+}
 
 type pipeAddr string
 

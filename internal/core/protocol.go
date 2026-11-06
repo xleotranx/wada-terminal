@@ -418,7 +418,9 @@ func (c *Client) callWithin(req Request, timeout time.Duration) (json.RawMessage
 		return nil, fmt.Errorf("core: no core: %w", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
 	body, err := jsonMarshal(req)
 	if err != nil {
 		return nil, err
