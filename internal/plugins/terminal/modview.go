@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"wada-terminal/internal/config"
@@ -12,6 +13,25 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/oneo-me/onevra/source/components"
 )
+
+// modState owns the panels, input values and animation scheduling.
+type modState struct {
+	// Mods: the loaded JavaScript panels, the tree each layout block last
+	// rendered, and what their console.log calls have said.
+	mods           map[string]*loadedMod
+	modViews       map[*config.Block]*modView
+	modInputs      map[*config.Block]map[string]*string
+	modAutoFocused map[*config.Block]map[string]bool
+	modFocus       map[*config.Block]map[string]bool
+	modLogs        map[string][]string
+
+	// Animating mods ask the window to draw at their own pace. A worker
+	// ticks and posts an invalidation only while a frame saw an animation,
+	// and sleeps while none does, so an idle window wakes for nothing.
+	modAnimated      atomic.Bool
+	modAnimatedFrame bool
+	modAnimatedWake  chan struct{}
+}
 
 // loadedMod is one mod's JavaScript runtime, or why it did not load.
 type loadedMod struct {

@@ -89,6 +89,12 @@ func (t *Plugin) floatingBlocks(root *config.Block) []*config.Block {
 			out = append(out, block)
 			return
 		}
+		if block.Type == "stack" {
+			if child, ok := t.stackChild(block); ok {
+				walk(child)
+			}
+			return
+		}
 		for i := range block.Children {
 			walk(&block.Children[i])
 		}
@@ -310,6 +316,7 @@ func (t *Plugin) blockElement(c *ui.Context, ch chrome, block *config.Block, axi
 	if t.blockHidden(block) {
 		return ui.Box(c)
 	}
+	var leaf ui.Element
 	switch block.Type {
 	case "row", "column", "stack":
 		var element ui.Element
@@ -375,71 +382,31 @@ func (t *Plugin) blockElement(c *ui.Context, ch chrome, block *config.Block, axi
 		return element
 
 	case "workspaces":
-		element := t.workspaceView(c, ch, position)
-		element = t.paintBlock(element, ch, block)
-		if block.Padding > 0 {
-			element = element.Padding(float32(block.Padding))
-		}
-		return t.sizeBlock(element, block, axis, path)
-
+		leaf = t.workspaceView(c, ch, position)
 	case "panes":
-		var element ui.Element
 		if t.current != nil && t.current.task != nil {
-			element = t.taskContent(c, ch, t.current)
+			leaf = t.taskContent(c, ch, t.current)
 		} else {
-			element = t.content(c, ch)
+			leaf = t.content(c, ch)
 		}
-		element = t.paintBlock(element, ch, block)
-		if block.Padding > 0 {
-			element = element.Padding(float32(block.Padding))
-		}
-		return t.sizeBlock(element, block, axis, path)
-
 	case "title":
-		element := t.titleActions(c)
-		element = t.paintBlock(element, ch, block)
-		if block.Padding > 0 {
-			element = element.Padding(float32(block.Padding))
-		}
-		return t.sizeBlock(element, block, axis, path)
-
+		leaf = t.titleActions(c)
 	case "tabs":
-		element := t.strip(c)
-		element = t.paintBlock(element, ch, block)
-		if block.Padding > 0 {
-			element = element.Padding(float32(block.Padding))
-		}
-		return t.sizeBlock(element, block, axis, path)
-
+		leaf = t.strip(c)
 	case "machines":
-		element := t.machinesPanel(c, ch)
-		element = t.paintBlock(element, ch, block)
-		if block.Padding > 0 {
-			element = element.Padding(float32(block.Padding))
-		}
-		return t.sizeBlock(element, block, axis, path)
-
+		leaf = t.machinesPanel(c, ch)
 	case "agents":
-		element := t.agentsPanel(c, ch)
-		element = t.paintBlock(element, ch, block)
-		if block.Padding > 0 {
-			element = element.Padding(float32(block.Padding))
-		}
-		return t.sizeBlock(element, block, axis, path)
-
-	case "float":
-		// A float has no place in the flow; the page draws it over the root.
-		return ui.Box(c)
-
+		leaf = t.agentsPanel(c, ch)
 	case "mod":
-		element := t.modBlock(c, ch, block)
-		element = t.paintBlock(element, ch, block)
-		if block.Padding > 0 {
-			element = element.Padding(float32(block.Padding))
-		}
-		return t.sizeBlock(element, block, axis, path)
+		leaf = t.modBlock(c, ch, block)
+	default:
+		return ui.Box(c)
 	}
-	return ui.Box(c)
+	leaf = t.paintBlock(leaf, ch, block)
+	if block.Padding > 0 {
+		leaf = leaf.Padding(float32(block.Padding))
+	}
+	return t.sizeBlock(leaf, block, axis, path)
 }
 
 // blockPx is a block's fixed size along its parent's axis, including a size
@@ -651,55 +618,27 @@ func (t *Plugin) agentPanelRow(c *ui.Context, ch chrome, e entry) {
 	})
 }
 
-// hasTabsBlock reports whether a layout places the tab strip itself.
-func (t *Plugin) hasTabsBlock(block *config.Block) bool {
-	if block == nil {
-		return false
-	}
-	if block.Type == "tabs" {
-		return true
-	}
-	for i := range block.Children {
-		if t.hasTabsBlock(&block.Children[i]) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasTitleBlock reports whether a layout places the title-bar actions itself.
-func (t *Plugin) hasTitleBlock(block *config.Block) bool {
-	if block == nil {
-		return false
-	}
-	if block.Type == "title" {
-		return true
-	}
-	for i := range block.Children {
-		if t.hasTitleBlock(&block.Children[i]) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasWorkspaceNavigation follows the visible layout, including stack choices.
-// Custom layouts without a workspace column retain the title-strip tabs.
-func (t *Plugin) hasWorkspaceNavigation(block *config.Block) bool {
+// visibleBlock finds a type only in the portion of the layout being drawn.
+func (t *Plugin) visibleBlock(block *config.Block, kind string) bool {
 	if t.blockHidden(block) {
 		return false
 	}
-	if block.Type == "workspaces" {
+	if block.Type == kind {
 		return true
 	}
 	if block.Type == "stack" {
 		child, ok := t.stackChild(block)
-		return ok && t.hasWorkspaceNavigation(child)
+		return ok && t.visibleBlock(child, kind)
 	}
 	for i := range block.Children {
-		if t.hasWorkspaceNavigation(&block.Children[i]) {
+		if t.visibleBlock(&block.Children[i], kind) {
 			return true
 		}
 	}
 	return false
+}
+func (t *Plugin) hasTabsBlock(block *config.Block) bool  { return t.visibleBlock(block, "tabs") }
+func (t *Plugin) hasTitleBlock(block *config.Block) bool { return t.visibleBlock(block, "title") }
+func (t *Plugin) hasWorkspaceNavigation(block *config.Block) bool {
+	return t.visibleBlock(block, "workspaces")
 }

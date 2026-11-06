@@ -415,10 +415,10 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		if folder == "" {
 			folder = t.focusedDir()
 		}
-		cols, rows := t.defaultSize()
-		s := t.startAt(w.machine, w.client, k, folder, cols, rows)
-		w.addTab(s, true)
-		t.saveWorkspaces()
+		s, err := t.createTab(k, folder)
+		if err != nil {
+			return nil, err
+		}
 		return map[string]any{"space": w.id, "tab": w.active + 1, "pane": s.id}, nil
 
 	case "tab.close":
@@ -439,8 +439,7 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		if n < 1 || n > len(w.tabs) {
 			return nil, fmt.Errorf("no tab %d", n)
 		}
-		w.selectTab(n - 1)
-		t.seen(w.focus)
+		t.selectTab(n - 1)
 		return map[string]any{"space": w.id, "tab": n}, nil
 
 	case "tab.next":

@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -145,7 +146,7 @@ func (t *Plugin) newAgent(id string) {
 		return
 	}
 	w := t.current
-	if w == nil {
+	if w == nil || (w.task != nil && w.task.Dir == "") {
 		return
 	}
 	cols, rows := t.defaultSize()
@@ -156,19 +157,29 @@ func (t *Plugin) newAgent(id string) {
 
 // startProgram starts an agent's own argv, local or on a machine.
 func (t *Plugin) startProgram(def config.Agent, id, machine string, client *core.Client, dir string, cols, rows int) *session {
+	detail := ""
+	if len(def.Command) > 0 {
+		detail = filepath.Base(def.Command[0])
+	}
 	s := &session{t: t, id: t.nextID, kind: kindShell, dir: dir, cols: cols, rows: rows,
 		alive: true, name: def.Name,
-		detail: filepath.Base(def.Command[0]), agent: true, agentID: id,
+		detail: detail, agent: true, agentID: id,
 		agentGlyph: def.Glyph, agentColor: def.Color, argv: append([]string(nil), def.Command...),
 		machine: machine, client: client, seen: true, wordProgress: -1}
 	t.nextID++
+	if len(def.Command) == 0 {
+		s.alive = false
+		s.status = "No command is configured for this agent."
+		return s
+	}
 	if client != nil && t.startRemote(s, def.Command) {
 		return s
 	}
 	if machine != "" {
 		s.alive = false
 		if client == nil {
-			s.status = "Machine " + machine + " is not connected."
+			s.status = "Machine " + machine + " is connecting."
+			t.waitMachineProgram(s, s.argv)
 		} else {
 			s.status = "Machine " + machine + " could not start this program."
 		}
@@ -212,13 +223,15 @@ func (t *Plugin) startAt(machine string, client *core.Client, k kind, dir string
 		s.detail = filepath.Base(argv[0])
 	}
 
+	s.argv = append([]string(nil), argv...)
 	if client != nil && t.startRemote(s, argv) {
 		return s
 	}
 	if machine != "" {
 		s.alive = false
 		if client == nil {
-			s.status = "Machine " + machine + " is not connected."
+			s.status = "Machine " + machine + " is connecting."
+			t.waitMachineProgram(s, s.argv)
 		} else {
 			s.status = "Machine " + machine + " could not start this program."
 		}
@@ -452,7 +465,8 @@ func (s *session) write(b []byte) {
 func (s *session) kill() {
 	s.closing.Store(true)
 	if s.remote && s.client != nil && s.coreID > 0 {
-		_ = s.client.Kill(s.coreID)
+		client, id := s.client, s.coreID
+		s.t.ctx.Spawn(func(context.Context) { _ = client.Kill(id) })
 	}
 	if s.scope != nil {
 		s.scope.Dispose()
@@ -561,4 +575,30 @@ func machineCommand(k kind, sp spec) []string {
 		return []string{sp.candidates[0]}
 	}
 	return []string{"/bin/sh", "-l"}
+}
+
+// waitMachineProgram keeps a pane as a placeholder while SSH connects.
+func (t *Plugin) waitMachineProgram(s *session, argv []string) {
+	s.scope = t.ctx.NewScope()
+	scope := s.scope
+	argv = append([]string(nil), argv...)
+	t.whenMachine(s.machine, func(client *core.Client, err error) {
+		if !scope.Alive() || s.closing.Load() {
+			return
+		}
+		if err != nil {
+			s.status = err.Error()
+			return
+		}
+		scope.Dispose()
+		s.client = client
+		s.alive = true
+		s.status = ""
+		for _, w := range t.workspaces {
+			if w.machine == s.machine {
+				w.client = client
+			}
+		}
+		t.startRemote(s, argv)
+	})
 }

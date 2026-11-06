@@ -1,7 +1,10 @@
 package terminal
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"sync/atomic"
 
 	"wada-terminal/internal/core"
 	"wada-terminal/internal/status"
@@ -36,74 +39,137 @@ func (t *Plugin) connectCore() {
 	}
 }
 
-// startRemote asks the core to run the program and attaches this pane to it.
-// It reports false when the core cannot start or attach, so start can fall
-// back to a terminal owned by the window rather than losing the pane.
+// startRemote starts and attaches in a session worker. The pane is returned
+// immediately; only the UI-thread completion installs its terminal.
 func (t *Plugin) startRemote(s *session, argv []string) bool {
 	if s == nil || s.client == nil || !s.alive || len(argv) == 0 {
 		return false
 	}
-	rec, err := s.client.Start(core.Start{
-		Argv: argv, Kind: s.kind.apiName(), Dir: s.dir,
-		Cols: max(s.cols, 2), Rows: max(s.rows, 2),
-		Dark: t.dark(), Theme: core.ThemeOf(t.terminalTheme()),
+	request := core.Start{Argv: append([]string(nil), argv...), Kind: s.kind.apiName(), Dir: s.dir,
+		Cols: max(s.cols, 2), Rows: max(s.rows, 2), Dark: t.dark(), Theme: core.ThemeOf(t.terminalTheme())}
+	client := s.client
+	s.scope = t.ctx.NewScope()
+	scope := s.scope
+	var installed atomic.Bool
+	scope.Spawn(func(ctx context.Context) {
+		rec, err := client.Start(request)
+		var stream *core.Stream
+		if err == nil {
+			stream, err = client.Attach(rec.ID, request.Cols, request.Rows, request.Theme)
+		}
+		if err != nil && rec.ID > 0 {
+			_ = client.Kill(rec.ID)
+		}
+		if ctx.Err() != nil {
+			if stream != nil {
+				_ = stream.Close()
+			}
+			if (s.closing.Load() || !installed.Load()) && rec.ID > 0 {
+				_ = client.Kill(rec.ID)
+			}
+			return
+		}
+		// Post through the plugin so a pane closed before delivery still releases
+		// its stream. Explicit pane closure also ends the newly started program.
+		t.ctx.Post(func() {
+			if s.closing.Load() || !scope.Alive() {
+				t.ctx.Spawn(func(context.Context) {
+					if stream != nil {
+						_ = stream.Close()
+					}
+					if s.closing.Load() {
+						_ = client.Kill(rec.ID)
+					}
+				})
+				return
+			}
+			if err != nil {
+				if s.machine == "" {
+					scope.Dispose()
+					t.startLocal(s, request.Argv)
+				} else {
+					s.alive = false
+					s.status = "The core could not start this program: " + err.Error()
+				}
+				return
+			}
+			t.installRemote(s, rec.ID, stream)
+			t.saveWorkspaces()
+			installed.Store(s.term != nil)
+		})
+		<-ctx.Done()
+		if stream != nil {
+			_ = stream.Close()
+		}
+		if (s.closing.Load() || !installed.Load()) && rec.ID > 0 {
+			_ = client.Kill(rec.ID)
+		}
 	})
-	if err != nil {
-		return false
-	}
-	if !t.attachRemote(s, rec.ID) {
-		_ = s.client.Kill(rec.ID)
-		s.alive = true
-		s.status = ""
-		return false
-	}
 	return true
 }
 
-// attachRemote joins a session to a terminal the core already runs. The
-// session's terminal shows the core's frames: the first starts it over from
-// the screen as it is, and it takes the sizes the core's terminal takes.
+// attachRemote schedules an attachment without waiting for the core on the UI.
 func (t *Plugin) attachRemote(s *session, id int) bool {
 	if s == nil || s.client == nil {
 		return false
 	}
-	stream, err := s.client.Attach(id, max(s.cols, 2), max(s.rows, 2), core.ThemeOf(t.terminalTheme()))
-	if err != nil {
-		s.alive = false
-		s.status = "The core could not attach: " + err.Error()
-		return false
-	}
 	s.scope = t.ctx.NewScope()
+	scope, client := s.scope, s.client
+	cols, rows, theme := max(s.cols, 2), max(s.rows, 2), core.ThemeOf(t.terminalTheme())
+	s.remote, s.coreID = true, id
+	scope.Spawn(func(ctx context.Context) {
+		stream, err := client.Attach(id, cols, rows, theme)
+		if ctx.Err() != nil {
+			if stream != nil {
+				_ = stream.Close()
+			}
+			return
+		}
+		t.ctx.Post(func() {
+			if !scope.Alive() || s.closing.Load() {
+				if stream != nil {
+					t.ctx.Spawn(func(context.Context) { _ = stream.Close() })
+				}
+				return
+			}
+			if err != nil {
+				s.alive = false
+				s.status = "The core could not attach: " + err.Error()
+				return
+			}
+			t.installRemote(s, id, stream)
+		})
+		<-ctx.Done()
+		if stream != nil {
+			_ = stream.Close()
+		}
+	})
+	return true
+}
+
+// installRemote is the UI-thread half of an attachment.
+func (t *Plugin) installRemote(s *session, id int, stream *core.Stream) {
 	s.remote, s.coreID, s.stream = true, id, stream
 	s.cols, s.rows = stream.Cols, stream.Rows
 	gate := &gated{Stream: stream, ready: make(chan struct{})}
 	opts := t.terminalOptions(s, gate)
-	// The core's terminal is the program's; this one lays out none of its
-	// output and takes the size the core's does, between the frames of one
-	// size and the next.
 	opts.ResizeByConn = true
 	term, err := mterm.New(opts)
 	if err != nil {
-		stream.Close()
-		s.scope.Dispose()
+		close(gate.ready)
+		t.ctx.Spawn(func(context.Context) { _ = stream.Close() })
 		s.alive = false
-		s.status = "The terminal could not start: " + err.Error()
-		return false
+		s.status = fmt.Sprintf("The terminal could not start: %v", err)
+		return
 	}
 	term.Resize(stream.Cols, stream.Rows)
-	stream.OnResized = func(cols, rows int) {
-		term.Resize(cols, rows)
-		s.scope.Post(func() { s.cols, s.rows = cols, rows })
-	}
+	stream.OnResized = func(cols, rows int) { term.Resize(cols, rows); s.scope.Post(func() { s.cols, s.rows = cols, rows }) }
 	stream.OnInfo = func(info core.Info) { s.scope.Post(func() { s.applyInfo(info) }) }
 	stream.OnOutput = s.outputSoon
 	s.term = term
-	s.scope.OnDispose(func() {
-		_ = term.Close()
-		_ = stream.Close()
-	})
+	// Closing a terminal can wait for transport writes; cleanup belongs to a worker.
+	s.scope.Spawn(func(ctx context.Context) { <-ctx.Done(); _ = term.Close(); _ = stream.Close() })
 	close(gate.ready)
-	return true
 }
 
 // gated holds the stream's frames back until the session's terminal and the

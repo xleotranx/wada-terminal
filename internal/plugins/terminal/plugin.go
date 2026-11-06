@@ -83,6 +83,7 @@ type Plugin struct {
 	// terminals outlive this window; the saved layout names them by id.
 	core          *core.Client
 	coreTerminals map[int]core.Record
+	remoteLayouts map[string]*layoutPublisher
 
 	// Machines: the files' definitions and the cores this window connected
 	// to. A machine's terminals live in its core, not this computer's.
@@ -104,21 +105,7 @@ type Plugin struct {
 	keyScope     *kernel.Scope
 	keys         config.Keys
 
-	// Mods: the loaded JavaScript panels, the tree each layout block last
-	// rendered, and what their console.log calls have said.
-	mods           map[string]*loadedMod
-	modViews       map[*config.Block]*modView
-	modInputs      map[*config.Block]map[string]*string
-	modAutoFocused map[*config.Block]map[string]bool
-	modFocus       map[*config.Block]map[string]bool
-	modLogs        map[string][]string
-
-	// Animating mods ask the window to draw at their own pace. A worker
-	// ticks and posts an invalidation only while a frame saw an animation,
-	// and sleeps while none does, so an idle window wakes for nothing.
-	modAnimated      atomic.Bool
-	modAnimatedFrame bool
-	modAnimatedWake  chan struct{}
+	modState
 
 	workspaces []*workspace
 	current    *workspace
@@ -659,15 +646,26 @@ func (w *workspace) sessions(out []*session) []*session {
 
 // newTab opens a session of kind k in a new tab of the workspace on show.
 func (t *Plugin) newTab(k kind) {
+	if t.current != nil {
+		_, _ = t.createTab(k, t.current.dir)
+	}
+}
+
+// createTab is shared by menu and control actions, including task policy.
+func (t *Plugin) createTab(k kind, dir string) (*session, error) {
 	w := t.current
-	if w == nil || (w.task != nil && w.task.Dir == "") {
-		return
+	if w == nil {
+		return nil, fmt.Errorf("no workspace")
+	}
+	if w.task != nil && w.task.Dir == "" {
+		return nil, fmt.Errorf("start the task before opening terminals")
 	}
 	t.taskInboxOpen = false
 	cols, rows := t.defaultSize()
-	s := t.startAt(w.machine, w.client, k, w.dir, cols, rows)
+	s := t.startAt(w.machine, w.client, k, dir, cols, rows)
 	w.addTab(s, true)
 	t.saveWorkspaces()
+	return s, nil
 }
 
 // splitFocused splits the focused pane, side by side when vertical is set,
@@ -848,7 +846,7 @@ func (t *Plugin) restart(old *session) {
 	k, dir, cols, rows := old.kind, old.dir, old.cols, old.rows
 	old.kill()
 	var next *session
-	if old.agent {
+	if old.agent && !old.detected {
 		def := config.Agent{Name: old.name, Command: old.argv, Glyph: old.agentGlyph,
 			Color: old.agentColor}
 		if configured, ok := t.agentDefs[old.agentID]; ok {

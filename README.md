@@ -34,7 +34,8 @@ the window, so closing it leaves your agents working.
 - **The interface as files** — `settings.json`, `keys.json`, `layouts/`,
   `themes/`, `agents.json` and JavaScript mods in a config folder. Save a file
   and the window reloads it; a broken file keeps the last good version and
-  writes an `.error` file beside it.
+  writes an `.error` file beside it. Mod render functions describe the panel;
+  persist state from click handlers, which save automatically.
 - **Real terminals** — the emulator is Ghostty's, through MyGo's terminal view:
   24-bit color, the alternate screen, wide characters and emoji, the Kitty
   keyboard protocol, input methods, a reflowing scrollback, mouse reporting,
@@ -42,7 +43,8 @@ the window, so closing it leaves your agents working.
   drag. `⌘=` and `⌘-` change the text size.
 - **Tasks and machines** — `⌘⇧T` queues an isolated task in a Git worktree, with
   review, checks and a finish flow. `core machine add vps --ssh vps` records
-  another machine's core, and spaces and terminals can run there.
+  another machine's core, and spaces and terminals can run there. Connections
+  run in the background, so an unreachable machine leaves the window usable.
 
 ![The Sessions view: every session in one list, with the blocked agent chosen](docs/images/sessions.png)
 

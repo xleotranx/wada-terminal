@@ -172,6 +172,8 @@ func (t *Plugin) openMachineTerminal(machine string, rec core.Record) {
 			Description: "The terminal could not be attached."})
 		return
 	}
+	s.foreground = rec.Foreground
+	t.adoptAgent(s)
 	// A labelled terminal belongs to its core's space; opening it on a
 	// workspace of that name keeps the space together.
 	if space != "" {

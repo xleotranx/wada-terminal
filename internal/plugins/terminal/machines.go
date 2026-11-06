@@ -15,12 +15,16 @@ import (
 // machineConn is one machine's core while the window is open: its client, the
 // terminals it had when the window connected, and why it could not connect.
 type machineConn struct {
-	name      string
-	client    *core.Client
-	terminals map[int]core.Record
-	instance  string
-	err       error
-	at        time.Time
+	name          string
+	client        *core.Client
+	terminals     map[int]core.Record
+	instance      string
+	err           error
+	at            time.Time
+	connecting    bool
+	waiters       []func(*core.Client, error)
+	restore       []workspaceSpec
+	savedInstance string
 }
 
 // connectSavedMachines connects the cores of the machines the saved layout
@@ -37,6 +41,13 @@ func (t *Plugin) connectSavedMachines() {
 		}
 		seen[spec.Machine] = true
 		_, _ = t.ensureMachine(spec.Machine)
+		if conn := t.machineConns[spec.Machine]; conn != nil && conn.connecting {
+			for _, saved := range t.saved.Get() {
+				if saved.Machine == spec.Machine {
+					conn.restore = append(conn.restore, saved)
+				}
+			}
+		}
 	}
 }
 
@@ -48,6 +59,9 @@ func (t *Plugin) ensureMachine(name string) (*core.Client, error) {
 		return t.core, nil
 	}
 	if conn := t.machineConns[name]; conn != nil {
+		if conn.connecting {
+			return nil, fmt.Errorf("machine %s is connecting", name)
+		}
 		if conn.client != nil {
 			return conn.client, nil
 		}
@@ -70,22 +84,68 @@ func (t *Plugin) ensureMachine(name string) (*core.Client, error) {
 		t.machineConns[name] = &machineConn{name: name, err: err, at: time.Now()}
 		return nil, err
 	}
-	client, err := core.ConnectMachine(definition.SSH, definition.Bin, os.Stderr)
-	conn := &machineConn{name: name, client: client, err: err, at: time.Now()}
-	if err == nil {
-		conn.instance = client.Instance()
-		if list, listErr := client.List(); listErr == nil {
-			conn.terminals = make(map[int]core.Record, len(list.Terminals))
-			for _, rec := range list.Terminals {
-				conn.terminals[rec.ID] = rec
-			}
-		}
-	}
+	conn := &machineConn{name: name, connecting: true, at: time.Now(), savedInstance: t.machineInstance(name)}
 	t.machineConns[name] = conn
-	if err == nil {
-		t.watchMachine(name, client)
+	t.ctx.Spawn(func(ctx context.Context) {
+		client, err := core.ConnectMachineContext(ctx, definition.SSH, definition.Bin, os.Stderr)
+		var list core.List
+		if err == nil {
+			list, err = client.List()
+		}
+		t.ctx.Post(func() {
+			if t.machineConns[name] != conn {
+				return
+			}
+			conn.connecting = false
+			conn.err = err
+			conn.at = time.Now()
+			if err == nil {
+				conn.client = client
+				conn.instance = client.Instance()
+				conn.terminals = map[int]core.Record{}
+				for _, rec := range list.Terminals {
+					conn.terminals[rec.ID] = rec
+				}
+				// Startup placeholders did not launch programs. Restore only after the
+				// remote instance is known, so existing terminals keep their identities.
+				for _, spec := range conn.restore {
+					for i, w := range t.workspaces {
+						if w.machine != name || w.name != spec.Name {
+							continue
+						}
+						for _, s := range w.sessions(nil) {
+							s.kill()
+						}
+						restored := t.buildWorkspace(spec, client, conn.savedInstance == conn.instance, i)
+						restored.name = w.name
+						t.workspaces[i] = restored
+						if t.current == w {
+							t.current = restored
+						}
+						break
+					}
+				}
+				t.watchMachine(name, client)
+			}
+			conn.restore = nil
+			for _, ready := range conn.waiters {
+				ready(client, err)
+			}
+			conn.waiters = nil
+			t.saveWorkspaces()
+		})
+	})
+	return nil, fmt.Errorf("machine %s is connecting", name)
+}
+
+// whenMachine completes on the UI thread once a connection attempt ends.
+func (t *Plugin) whenMachine(name string, ready func(*core.Client, error)) {
+	client, err := t.ensureMachine(name)
+	if conn := t.machineConns[name]; conn != nil && conn.connecting {
+		conn.waiters = append(conn.waiters, ready)
+		return
 	}
-	return client, err
+	ready(client, err)
 }
 
 // watchMachine refreshes a machine's terminal list in the background, so a
@@ -114,6 +174,7 @@ func (t *Plugin) watchMachine(name string, client *core.Client) {
 						return
 					}
 					if conn.err == nil && sameTerminals(conn.terminals, terminals) {
+						t.adoptMachineForegrounds(name, terminals)
 						return // a poll that found nothing draws nothing
 					}
 					conn.terminals = terminals
@@ -154,20 +215,7 @@ func (t *Plugin) recordMachineInstances() {
 }
 
 // hasMachinesBlock reports whether the layout asks for the Machines panel.
-func (t *Plugin) hasMachinesBlock(block *config.Block) bool {
-	if block == nil {
-		return false
-	}
-	if block.Type == "machines" && !block.Hidden {
-		return true
-	}
-	for i := range block.Children {
-		if t.hasMachinesBlock(&block.Children[i]) {
-			return true
-		}
-	}
-	return false
-}
+func (t *Plugin) hasMachinesBlock(block *config.Block) bool { return t.visibleBlock(block, "machines") }
 
 // connectPanelMachines connects every configured machine when the layout
 // shows the Machines panel, so the panel has terminals to list. Without the
@@ -182,9 +230,11 @@ func (t *Plugin) connectPanelMachines() {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if _, err := t.ensureMachine(name); err == nil {
-			t.autoImportSpaces(name)
-		}
+		t.whenMachine(name, func(_ *core.Client, err error) {
+			if err == nil {
+				t.autoImportSpaces(name)
+			}
+		})
 	}
 }
 

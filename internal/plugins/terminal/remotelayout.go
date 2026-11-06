@@ -120,11 +120,19 @@ func (t *Plugin) autoImportSpaces(machine string) {
 	})
 }
 
-// publishRemoteLayouts writes each connected machine's spaces into its core
-// in the background, so a layout edit reaches the machine's own document.
+// layoutPublisher serializes a machine's saves and keeps only the newest
+// waiting snapshot while the previous request is in flight.
+type layoutPublisher struct {
+	client  *core.Client
+	pending chan []byte
+}
+
 func (t *Plugin) publishRemoteLayouts() {
 	if t.ctx == nil {
 		return
+	}
+	if t.remoteLayouts == nil {
+		t.remoteLayouts = map[string]*layoutPublisher{}
 	}
 	specs := t.workspaceSpecs()
 	for machine, conn := range t.machineConns {
@@ -138,16 +146,34 @@ func (t *Plugin) publishRemoteLayouts() {
 			}
 		}
 		if len(doc.Spaces) == 0 {
-			continue // never erase a document this window knows nothing about
+			continue
 		}
 		body, err := json.Marshal(doc)
 		if err != nil {
 			continue
 		}
-		client := conn.client
-		t.ctx.Spawn(func(context.Context) {
-			_ = client.SetLayoutAtWithin(body, 0, time.Second)
-		})
+		publisher := t.remoteLayouts[machine]
+		if publisher == nil || publisher.client != conn.client {
+			publisher = &layoutPublisher{client: conn.client, pending: make(chan []byte, 1)}
+			t.remoteLayouts[machine] = publisher
+			t.ctx.Spawn(func(ctx context.Context) {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case body := <-publisher.pending:
+						if err := publisher.client.SetLayoutAtWithin(body, 0, time.Second); err != nil {
+							t.ctx.Post(func() { t.configProblem("layout on "+machine, err) })
+						}
+					}
+				}
+			})
+		}
+		select {
+		case <-publisher.pending:
+		default:
+		}
+		publisher.pending <- body
 	}
 }
 

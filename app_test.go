@@ -1190,6 +1190,58 @@ exec sh -c "$*"
 			}
 		}
 	}
+	// Creating a pane returns immediately. Wait for both remote programs before
+	// checking that closing and reopening only detaches and reattaches.
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		w.run()
+		client, err := core.Connect(remoteDir)
+		if err == nil {
+			list, err := client.List()
+			if err == nil && len(list.Terminals) >= 2 {
+				known := map[int]bool{}
+				for _, record := range list.Terminals {
+					known[record.ID] = true
+				}
+				// A core record precedes delivery of its attachment to the UI.
+				// Wait until both IDs are present in the saved layout as well.
+				values, err := w.store.Load(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				ready := false
+				for _, value := range values {
+					if value.Namespace != "terminal" || value.Key != "workspaces" {
+						continue
+					}
+					var spaces []struct {
+						Machine string
+						Tabs    []struct {
+							Root struct{ Pane struct{ Terminal int } }
+						}
+					}
+					if err := json.Unmarshal(value.JSON, &spaces); err != nil {
+						t.Fatal(err)
+					}
+					for _, space := range spaces {
+						if space.Machine == "box" && len(space.Tabs) == 2 {
+							ready = true
+							for _, tab := range space.Tabs {
+								ready = ready && known[tab.Root.Pane.Terminal]
+							}
+						}
+					}
+				}
+				if ready {
+					break
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("remote programs did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	before := remoteTerminalCount(t, remoteDir)
 	w.close()
 	// A second window on the same store and data folder reattaches to the
