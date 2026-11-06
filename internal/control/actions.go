@@ -115,7 +115,9 @@ func FindAction(name string) (Action, bool) {
 }
 
 // Validate checks an action's arguments: known names only, the required ones
-// present, and each value of the type its action declares.
+// present, and each value of the type its action declares. A null is not an
+// omission: an omitted target defaults to what is focused, and a caller's unset
+// variable must not act on that.
 func Validate(action Action, args map[string]any) error {
 	known := make(map[string]Arg, len(action.Args))
 	for _, arg := range action.Args {
@@ -136,6 +138,9 @@ func Validate(action Action, args map[string]any) error {
 		if !ok || value == nil {
 			if arg.Required {
 				return fmt.Errorf("%s needs --%s", action.Name, arg.Name)
+			}
+			if ok {
+				return fmt.Errorf("--%s is null; leave it out for its default", arg.Name)
 			}
 			continue
 		}

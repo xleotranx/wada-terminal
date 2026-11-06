@@ -38,6 +38,23 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// TestValidateRefusesNull checks every argument of every action: a null is
+// refused, not read as omitted, since an omitted target means the focused pane,
+// the shown tab or the space on show.
+func TestValidateRefusesNull(t *testing.T) {
+	for _, action := range Actions {
+		for _, arg := range action.Args {
+			if err := Validate(action, map[string]any{arg.Name: nil}); err == nil {
+				t.Errorf("%s accepted a null --%s", action.Name, arg.Name)
+			}
+		}
+	}
+	closeTab, _ := FindAction("tab.close")
+	if err := Validate(closeTab, map[string]any{}); err != nil {
+		t.Fatalf("an omitted optional argument was refused: %v", err)
+	}
+}
+
 // sendArgRequired reports whether an action requires an argument.
 func sendArgRequired(action Action, name string) bool {
 	for _, arg := range action.Args {

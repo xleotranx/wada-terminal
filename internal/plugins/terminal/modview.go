@@ -138,9 +138,9 @@ func (t *Plugin) modAPI(name string, state map[string]any) *mods.API {
 			return t.controlDo(action, args)
 		},
 		Send: func(terminal int, text string) error {
-			s := t.sessionByID(terminal)
-			if s == nil {
-				return fmt.Errorf("no pane %d", terminal)
+			s, err := t.paneToWrite(terminal)
+			if err != nil {
+				return err
 			}
 			s.write([]byte(text))
 			return nil

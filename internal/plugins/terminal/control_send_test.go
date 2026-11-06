@@ -208,3 +208,40 @@ func TestSendRefusesAStoppedPane(t *testing.T) {
 		}
 	})
 }
+
+// TestModSendFollowsTheSameRules checks a mod's send: the named pane only, and
+// an error rather than silence for an unknown id or a stopped pane.
+func TestModSendFollowsTheSameRules(t *testing.T) {
+	sw := newSendWindow(t)
+	send := sw.p.modAPI("test", nil).Send
+	if err := send(12, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, sw.besideIn, "hello")
+	if err := send(99, "secret"); err == nil || !strings.Contains(err.Error(), "no pane 99") {
+		t.Fatalf("an unknown id answered %v", err)
+	}
+	sw.away.alive = false
+	if err := send(13, "secret"); err == nil || !strings.Contains(err.Error(), "pane 13 is not running") {
+		t.Fatalf("a stopped pane answered %v", err)
+	}
+}
+
+// TestNullTargetIsNotTheFocusedPane checks that a null id, which a caller's
+// unset variable can become, is refused and does not act on the focused pane.
+func TestNullTargetIsNotTheFocusedPane(t *testing.T) {
+	sw := newSendWindow(t)
+	for _, action := range []string{"pane.close", "pane.split", "terminal.read"} {
+		args := map[string]any{"pane": nil}
+		if action == "pane.split" {
+			args["direction"] = "right"
+		}
+		resp := sw.p.controlResponse(control.Request{Method: "do", Action: action, Args: args})
+		if !strings.Contains(resp.Error, "--pane is null") {
+			t.Errorf("%s answered %+v", action, resp)
+		}
+	}
+	if !sw.focused.alive || sw.p.current.focus != sw.focused {
+		t.Fatal("a refused action changed the focused pane")
+	}
+}

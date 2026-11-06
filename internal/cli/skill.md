@@ -34,6 +34,8 @@ wada-terminal do terminal.read --pane 4 --lines 40
 wada-terminal do pane.split '{"direction":"right","pane":4}'
 ```
 
+Leave an argument out for its default; a JSON `null` is an error.
+
 It prints the created or changed ids as JSON, or an error and exits 1. Check
 the result with `ls` or `status`.
 

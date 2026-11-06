@@ -498,12 +498,9 @@ func (t *Plugin) controlDo(name string, args map[string]any) (any, error) {
 		if !ok {
 			return nil, fmt.Errorf("terminal.send needs a terminal")
 		}
-		s, err := t.paneByID(id)
+		s, err := t.paneToWrite(id)
 		if err != nil {
 			return nil, err
-		}
-		if !s.writable() {
-			return nil, fmt.Errorf("pane %d is not running", id)
 		}
 		text, _ := control.String(args, "text")
 		submit := true
@@ -573,6 +570,19 @@ func (t *Plugin) paneByID(id int) (*session, error) {
 		return s, nil
 	}
 	return nil, fmt.Errorf("no pane %d", id)
+}
+
+// paneToWrite finds a pane that can take text: one with this id whose program
+// is running, so a caller is never told that undelivered text arrived.
+func (t *Plugin) paneToWrite(id int) (*session, error) {
+	s, err := t.paneByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if !s.writable() {
+		return nil, fmt.Errorf("pane %d is not running", id)
+	}
+	return s, nil
 }
 
 // sessionByID finds a session by the id ls prints.

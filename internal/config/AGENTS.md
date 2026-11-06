@@ -391,7 +391,8 @@ A click's API also has:
 
 - `api.run(action, args)`: run any `wada-terminal do` action; it is validated
   and returns the action's result or throws
-- `api.send(terminal, text)`: type text into a pane, without Return
+- `api.send(terminal, text)`: type text into a pane, without Return; it throws
+  for an unknown id or a pane that is not running
 
 Limits: 1000 nodes, depth 32, 200 children, text 4000 bytes. A broken script
 keeps the last good panel; its block shows the error and the load error is
