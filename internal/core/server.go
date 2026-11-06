@@ -222,8 +222,9 @@ func (s *Server) dispatch(req Request) Response {
 	case "layout.get":
 		s.layoutMu.Lock()
 		layout := append(json.RawMessage(nil), s.layout...)
+		revision := s.layoutRev
 		s.layoutMu.Unlock()
-		return result(map[string]any{"layout": layout, "revision": s.layoutRev})
+		return result(map[string]any{"layout": layout, "revision": revision})
 
 	case "layout.set":
 		if len(req.Layout) == 0 || !json.Valid(req.Layout) {
@@ -235,9 +236,7 @@ func (s *Server) dispatch(req Request) Response {
 			s.layoutMu.Unlock()
 			return Response{Error: fmt.Sprintf("layout changed (revision %d)", current)}
 		}
-		s.layout = append(json.RawMessage(nil), req.Layout...)
-		s.layoutRev++
-		s.layoutMu.Unlock()
+		defer s.layoutMu.Unlock()
 		path := filepath.Join(s.dir, "layout.json")
 		tmp := path + ".tmp"
 		if err := os.WriteFile(tmp, req.Layout, 0o600); err != nil {
@@ -246,7 +245,11 @@ func (s *Server) dispatch(req Request) Response {
 		if err := os.Rename(tmp, path); err != nil {
 			return Response{Error: err.Error()}
 		}
-		_ = os.WriteFile(filepath.Join(s.dir, "layout.rev"), []byte(strconv.FormatInt(s.layoutRev, 10)), 0o600)
+		s.layout = append(json.RawMessage(nil), req.Layout...)
+		s.layoutRev++
+		if err := os.WriteFile(filepath.Join(s.dir, "layout.rev"), []byte(strconv.FormatInt(s.layoutRev, 10)), 0o600); err != nil {
+			return Response{Error: err.Error()}
+		}
 		return result(map[string]any{"saved": true, "revision": s.layoutRev})
 
 	case "kill":
