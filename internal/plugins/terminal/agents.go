@@ -182,23 +182,24 @@ func (s *session) agentState() agentState {
 // stateLabel names what a session holds; a shell is running rather than idle
 // between prompts. A blocked program's own word says what it waits for.
 func (s *session) stateLabel() string {
-	if s.isAgent() {
-		if s.agentState() == agentBlocked {
-			switch s.wordKind {
-			case "permission":
-				return "Needs approval"
-			case "question":
-				return "Needs answer"
-			case "auth":
-				return "Needs login"
-			}
+	if !s.isAgent() {
+		if s.alive {
+			return "Running"
 		}
-		return s.agentState().label()
+		return "Stopped"
 	}
-	if s.alive {
-		return "Running"
+	state := s.agentState()
+	if state == agentBlocked {
+		switch s.wordKind {
+		case "permission":
+			return "Needs approval"
+		case "question":
+			return "Needs answer"
+		case "auth":
+			return "Needs login"
+		}
 	}
-	return "Stopped"
+	return state.label()
 }
 
 // settle ends a quiet working spell and returns whether the state the window
@@ -213,18 +214,15 @@ func (s *session) settle(watched bool) bool {
 	before := s.agentState()
 	s.busy = false
 	if s.isAgent() {
-		if blockedOnScreen(screenTail(s.screenText(), 12)) {
-			s.blocked = true
+		s.blocked = blockedOnScreen(screenTail(s.screenText(), 12))
+		switch {
+		case s.blocked:
 			s.done = false
-		} else {
-			s.blocked = false
-			switch {
-			case watched:
-				// The user watched it finish: there is nothing to announce.
-				s.asked, s.done = false, false
-			case s.asked:
-				s.done = true
-			}
+		case watched:
+			// The user watched it finish: there is nothing to announce.
+			s.asked, s.done = false, false
+		case s.asked:
+			s.done = true
 		}
 	}
 	return s.agentState() != before
